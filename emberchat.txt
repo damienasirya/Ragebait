@@ -1,0 +1,3245 @@
+-- ✦ EMBER RECHAT ✦ — Music Fixed + Ares-Style Auto-Delete
+-- Owners/Creators: cravingsforanshi + krishnahuywar
+
+if getgenv().EmberRechatLoaded then return end
+getgenv().EmberRechatLoaded = true
+
+local SESSION_START_TIME = os.time()
+
+-- ============================================================
+-- OWNER / CREATOR CONFIG
+-- ============================================================
+local OWNER_NAMES = {
+    ["ZeNGOTBANNEDlwl2"] = true,
+    ["damien_yt62"] = true,
+}
+local OWNER_USERIDS = {
+    [11707254550] = true,
+}
+
+local function isOwnerName(name)
+    if not name then return false end
+    return OWNER_NAMES[tostring(name):lower()] == true
+end
+
+local function isOwnerUserId(uid)
+    return OWNER_USERIDS[tonumber(uid)] == true
+end
+
+-- ============================================================
+-- SERVICES
+-- ============================================================
+local HttpService      = game:GetService("HttpService")
+local Players          = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService       = game:GetService("RunService")
+local TweenService     = game:GetService("TweenService")
+local SoundService     = game:GetService("SoundService")
+local LocalPlayer      = Players.LocalPlayer
+local JobId            = game.JobId
+
+-- ============================================================
+-- SAFE REQUEST
+-- ============================================================
+local function rawRequest(opts)
+    if not opts or not opts.Url then return nil end
+    local fn = request or http_request or (http and http.request) or (syn and syn.request) or (fluxus and fluxus.request)
+    if not fn then return nil end
+    local ok, res = pcall(fn, opts)
+    if ok and res then return res end
+    return nil
+end
+
+-- ============================================================
+-- FIREBASE
+-- ============================================================
+local FB_BASE           = "https://zenit-chat-8df28-default-rtdb.firebaseio.com"
+local DATABASE_URL      = FB_BASE .. "/chat"
+local ONLINE_URL        = FB_BASE .. "/online"
+local UNSENT_URL        = FB_BASE .. "/unsent"
+local BAN_URL           = FB_BASE .. "/bans"
+local CUSTOM_TITLES_URL = FB_BASE .. "/custom_titles"
+local CMDS_URL          = FB_BASE .. "/cmds"
+local PFPS_URL          = FB_BASE .. "/pfps"
+local MUSIC_URL         = FB_BASE .. "/music"
+local THEME_URL         = FB_BASE .. "/theme"
+local ACCESS_URL        = FB_BASE .. "/panel_access"
+
+local FIREBASE_WEB_API_KEY = "AIzaSyCzL0r6LpdvrzZM5PYvhEBFUx-NEKOZOnM"
+local _fbIdToken = nil
+local _fbUid = nil
+local _fbTokenExpiry = 0
+
+local function fbSignIn()
+    local res = rawRequest({
+        Url = "https://identitytoolkit.googleapis.com/v1/accounts:signUp?key="..FIREBASE_WEB_API_KEY,
+        Method = "POST",
+        Headers = {["Content-Type"]="application/json"},
+        Body = '{"returnSecureToken":true}',
+    })
+    if not res or not res.Body then return false end
+    local ok, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
+    if not ok or type(data)~="table" or not data.idToken then return false end
+    _fbIdToken = data.idToken
+    _fbUid = data.localId
+    _fbTokenExpiry = os.time() + 3300
+    return true
+end
+
+pcall(fbSignIn)
+task.spawn(function() while true do task.wait(3300) pcall(fbSignIn) end end)
+
+local function fbReq(opts)
+    if type(opts)=="table" and type(opts.Url)=="string" and opts.Url:find("firebaseio%.com") then
+        if not _fbIdToken or os.time() >= _fbTokenExpiry then pcall(fbSignIn) end
+        if _fbIdToken then
+            opts.Url = opts.Url..(opts.Url:find("?") and "&" or "?").."auth=".._fbIdToken
+        end
+    end
+    return rawRequest(opts)
+end
+
+local function checkIsOwner()
+    local ok = false
+    pcall(function()
+        if isOwnerName(LocalPlayer.Name) then ok = true end
+        if isOwnerUserId(LocalPlayer.UserId) then ok = true end
+    end)
+    return ok
+end
+
+local isOwner = checkIsOwner()
+local RealUserId = LocalPlayer.UserId
+local RealName = LocalPlayer.Name
+local RealDisplayName = LocalPlayer.DisplayName
+
+-- ============================================================
+-- PANEL ACCESS
+-- ============================================================
+local PanelAccess = {}
+local MyPanelAccess = false
+
+local function loadPanelAccess()
+    pcall(function()
+        local res = fbReq({Url = ACCESS_URL..".json", Method="GET"})
+        if res and res.Body and res.Body ~= "null" then
+            local ok, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
+            if ok and type(data) == "table" then
+                local now = os.time()
+                for uidStr, entry in pairs(data) do
+                    local uid = tonumber(uidStr)
+                    if uid and type(entry) == "table" and entry.expiresAt then
+                        if entry.expiresAt > now then
+                            PanelAccess[uid] = entry.expiresAt
+                        else
+                            task.spawn(function()
+                                pcall(function()
+                                    fbReq({Url = ACCESS_URL.."/"..uidStr..".json", Method = "DELETE"})
+                                end)
+                            end)
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    if isOwner then
+        MyPanelAccess = true
+    else
+        local exp = PanelAccess[RealUserId]
+        MyPanelAccess = (exp and exp > os.time()) and true or false
+    end
+end
+
+pcall(loadPanelAccess)
+
+task.spawn(function()
+    while task.wait(20) do
+        pcall(loadPanelAccess)
+    end
+end)
+
+local function givePanelAccess(targetUid, targetName, durationSeconds)
+    if not isOwner then return false end
+    local exp = os.time() + durationSeconds
+    PanelAccess[targetUid] = exp
+    task.spawn(function()
+        pcall(function()
+            fbReq({
+                Url = ACCESS_URL.."/"..tostring(targetUid)..".json",
+                Method = "PUT",
+                Headers = {["Content-Type"]="application/json"},
+                Body = HttpService:JSONEncode({
+                    name = targetName,
+                    expiresAt = exp,
+                    grantedBy = RealUserId,
+                    grantedAt = os.time(),
+                    duration = durationSeconds,
+                })
+            })
+        end)
+    end)
+    return true
+end
+
+local function revokePanelAccess(targetUid)
+    if not isOwner then return false end
+    PanelAccess[targetUid] = nil
+    task.spawn(function()
+        pcall(function()
+            fbReq({Url = ACCESS_URL.."/"..tostring(targetUid)..".json", Method = "DELETE"})
+        end)
+    end)
+    return true
+end
+
+-- ============================================================
+-- BAN / UNBAN
+-- ============================================================
+local BannedUsers = {}
+local BannedHwids = {}
+
+local function getHWID()
+    local hwid = ""
+    pcall(function()
+        if gethwid then
+            local ok, r = pcall(gethwid)
+            if ok and type(r) == "string" then hwid = r:lower():gsub("%s+", "") end
+        end
+    end)
+    if hwid == "" then
+        pcall(function()
+            if getmacaddress then
+                local ok, r = pcall(getmacaddress)
+                if ok and type(r) == "string" then hwid = r:lower():gsub("%s+", "") end
+            end
+        end)
+    end
+    if hwid == "" then
+        pcall(function()
+            if getdeviceid then
+                local ok, r = pcall(getdeviceid)
+                if ok and type(r) == "string" then hwid = r:lower():gsub("%s+", "") end
+            end
+        end)
+    end
+    return hwid
+end
+
+local MyHWID = getHWID()
+
+local function loadBans()
+    pcall(function()
+        local res = fbReq({Url = BAN_URL.."/byRobloxId.json", Method="GET"})
+        if res and res.Body and res.Body ~= "null" then
+            local ok, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
+            if ok and type(data) == "table" then
+                for uidStr, entry in pairs(data) do
+                    local uid = tonumber(uidStr)
+                    if uid and type(entry) == "table" then
+                        BannedUsers[uid] = entry
+                    end
+                end
+            end
+        end
+    end)
+    pcall(function()
+        local res = fbReq({Url = BAN_URL.."/byHwid.json", Method="GET"})
+        if res and res.Body and res.Body ~= "null" then
+            local ok, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
+            if ok and type(data) == "table" then
+                for hwid, entry in pairs(data) do
+                    if type(entry) == "table" then
+                        BannedHwids[hwid] = entry
+                    end
+                end
+            end
+        end
+    end)
+end
+
+pcall(loadBans)
+
+local function checkSelfBan()
+    if isOwner then return false end
+    if BannedUsers[RealUserId] then return BannedUsers[RealUserId].reason or "Banned" end
+    if MyHWID ~= "" and BannedHwids[MyHWID] then return BannedHwids[MyHWID].reason or "Banned" end
+    return false
+end
+
+local selfBan = checkSelfBan()
+if selfBan then
+    task.spawn(function()
+        task.wait(1)
+        pcall(function()
+            LocalPlayer:Kick("🚫 You are permanently banned from Ember Rechat.\nReason: "..tostring(selfBan))
+        end)
+    end)
+    return
+end
+
+local function banPlayer(targetUid, targetName, reason)
+    if not isOwner then return false end
+    local entry = {
+        name = targetName,
+        reason = reason or "Banned by Ember Owner",
+        bannedAt = os.time(),
+        bannedBy = RealUserId,
+    }
+    BannedUsers[targetUid] = entry
+    task.spawn(function()
+        pcall(function()
+            fbReq({
+                Url = BAN_URL.."/byRobloxId/"..tostring(targetUid)..".json",
+                Method = "PUT",
+                Headers = {["Content-Type"]="application/json"},
+                Body = HttpService:JSONEncode(entry)
+            })
+        end)
+    end)
+    task.spawn(function()
+        pcall(function()
+            local ts = string.format("%012d", os.time())..math.random(100, 999)
+            fbReq({
+                Url = CMDS_URL.."/"..ts..".json",
+                Method = "PUT",
+                Headers = {["Content-Type"]="application/json"},
+                Body = HttpService:JSONEncode({
+                    TargetUid = targetUid,
+                    Action = "ban",
+                    Value = "🚫 You are permanently banned from Ember Rechat.\nReason: "..(reason or "Banned by Ember Owner"),
+                    IssuedBy = RealUserId,
+                    Server = "GLOBAL",
+                    expiresAt = os.time() + 5,
+                })
+            })
+        end)
+    end)
+    return true
+end
+
+local function unbanPlayer(targetUid)
+    if not isOwner then return false end
+    BannedUsers[targetUid] = nil
+    task.spawn(function()
+        pcall(function()
+            fbReq({Url = BAN_URL.."/byRobloxId/"..tostring(targetUid)..".json", Method = "DELETE"})
+        end)
+    end)
+    return true
+end
+
+-- ============================================================
+-- THEME
+-- ============================================================
+local EmberTheme = {
+    mainBg = Color3.fromRGB(200,230,255),
+    headerBg = Color3.fromRGB(100,185,255),
+    accent = Color3.fromRGB(60,140,255),
+    text = Color3.fromRGB(20,55,100),
+}
+
+local function loadTheme()
+    pcall(function()
+        local res = fbReq({Url=THEME_URL..".json", Method="GET"})
+        if res and res.Body and res.Body~="null" then
+            local ok,data = pcall(HttpService.JSONDecode,HttpService,res.Body)
+            if ok and type(data)=="table" then
+                if data.mainBg then EmberTheme.mainBg = Color3.fromRGB(data.mainBg[1],data.mainBg[2],data.mainBg[3]) end
+                if data.headerBg then EmberTheme.headerBg = Color3.fromRGB(data.headerBg[1],data.headerBg[2],data.headerBg[3]) end
+                if data.accent then EmberTheme.accent = Color3.fromRGB(data.accent[1],data.accent[2],data.accent[3]) end
+            end
+        end
+    end)
+end
+
+local function saveTheme()
+    pcall(function()
+        fbReq({
+            Url = THEME_URL..".json",
+            Method = "PUT",
+            Headers = {["Content-Type"]="application/json"},
+            Body = HttpService:JSONEncode({
+                mainBg = {math.floor(EmberTheme.mainBg.R*255),math.floor(EmberTheme.mainBg.G*255),math.floor(EmberTheme.mainBg.B*255)},
+                headerBg = {math.floor(EmberTheme.headerBg.R*255),math.floor(EmberTheme.headerBg.G*255),math.floor(EmberTheme.headerBg.B*255)},
+                accent = {math.floor(EmberTheme.accent.R*255),math.floor(EmberTheme.accent.G*255),math.floor(EmberTheme.accent.B*255)},
+            })
+        })
+    end)
+end
+
+pcall(loadTheme)
+
+-- ============================================================
+-- STATE
+-- ============================================================
+local TagCache = {}
+local SpecialLabels = {}
+local processedKeys = {}
+local MutedPlayers = {}
+local CustomTitles = {}
+local CustomPFP = {}
+local PrivateTargetId = nil
+local PrivateTargetName = nil
+local ReplyTargetName = nil
+local ReplyTargetMsg = nil
+local editingKey = nil
+local isKickedOrBanned = false
+local MAX_MESSAGES = 25
+local _lastSentTime = 0
+local _lastSentMsg = ""
+local MAX_CHAR_LIMIT = 200
+
+-- ⭐ ARES-STYLE MESSAGE TRACKING (NEW)
+local messageOrder = {}          -- array of message keys in order (oldest → newest)
+local messageMap = {}            -- key -> {frame, btn, senderUid, content}
+local deletedKeys = {}           -- tracking deleted keys
+local AUTO_CLEAN_INTERVAL = 600  -- 10 min inactivity auto-clean
+local lastActivityTime = os.time()
+
+-- ============================================================
+-- HELPERS
+-- ============================================================
+local function GetPlayerByName(name)
+    if not name or name=="" then return nil end
+    name=string.lower(name)
+    for _,p in pairs(Players:GetPlayers()) do
+        if string.find(string.lower(p.Name),name,1,true) or string.find(string.lower(p.DisplayName),name,1,true) then
+            return p
+        end
+    end
+    return nil
+end
+
+local function isPlayerOwner(player)
+    if not player then return false end
+    if isOwnerName(player.Name) then return true end
+    if isOwnerUserId(player.UserId) then return true end
+    return false
+end
+
+local function SafeEncodeMsg(raw)
+    raw=tostring(raw or "")
+    raw=raw:gsub("<[^>]*>","")
+    return raw
+end
+
+local USER_COLORS = {
+    Color3.fromRGB(225,48,108),Color3.fromRGB(64,93,230),Color3.fromRGB(0,149,246),
+    Color3.fromRGB(255,122,0),Color3.fromRGB(120,65,255),Color3.fromRGB(0,200,120),
+    Color3.fromRGB(255,200,0),Color3.fromRGB(220,50,50),
+}
+local function GetUserColor(name)
+    local sum=0
+    for i=1,#name do sum=sum+string.byte(name,i) end
+    return USER_COLORS[(sum%#USER_COLORS)+1]
+end
+
+local function savePFP(userId, assetId)
+    pcall(function()
+        fbReq({
+            Url = PFPS_URL.."/"..tostring(userId)..".json",
+            Method = "PUT",
+            Headers = {["Content-Type"]="application/json"},
+            Body = HttpService:JSONEncode({asset=assetId,setBy=RealUserId,t=os.time()})
+        })
+    end)
+end
+
+local function loadAllPFPs()
+    pcall(function()
+        local res = fbReq({Url=PFPS_URL..".json", Method="GET"})
+        if res and res.Body and res.Body~="null" then
+            local ok,data = pcall(HttpService.JSONDecode,HttpService,res.Body)
+            if ok and type(data)=="table" then
+                for uidStr,entry in pairs(data) do
+                    local uid = tonumber(uidStr)
+                    if uid and type(entry)=="table" and entry.asset then
+                        CustomPFP[uid] = tostring(entry.asset)
+                    end
+                end
+            end
+        end
+    end)
+end
+
+pcall(loadAllPFPs)
+
+-- ============================================================
+-- SOUNDCLOUD MUSIC (FIXED)
+-- ============================================================
+local MusicPlayer = nil
+local CurrentTrack = nil
+local currentVolume = 0.5
+local LastMusicTimestamp = 0
+local _scClientId = "Pb72ranhoyt6gw7hM7TkzUItXlMWSNSo"
+local _scRefreshCooldown = 0
+local _musicDownloading = false
+
+local function stopLocalMusic()
+    if MusicPlayer then pcall(function() MusicPlayer:Stop() MusicPlayer:Destroy() end) MusicPlayer = nil end
+    CurrentTrack = nil
+end
+
+local function broadcastMusic(action, trackData, startedBy)
+    pcall(function()
+        fbReq({
+            Url = MUSIC_URL.."/current.json",
+            Method = "PUT",
+            Headers = {["Content-Type"]="application/json"},
+            Body = HttpService:JSONEncode({
+                action = action,
+                track = trackData,
+                startedBy = startedBy or RealDisplayName,
+                startedByUid = RealUserId,
+                timestamp = os.time() * 1000 + math.random(1,999),
+            })
+        })
+    end)
+end
+
+local function syncMusic()
+    pcall(function()
+        local res = fbReq({Url = MUSIC_URL.."/current.json", Method="GET"})
+        if not res or not res.Body or res.Body == "null" then return end
+        local ok, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
+        if not ok or type(data) ~= "table" then return end
+        if (data.timestamp or 0) <= LastMusicTimestamp then return end
+        LastMusicTimestamp = data.timestamp or 0
+        if data.action == "stop" then
+            stopLocalMusic()
+        elseif data.action == "play" and data.track then
+            local trackData = data.track
+            task.spawn(function()
+                if _musicDownloading then return end
+                _musicDownloading = true
+                local streamUrl = trackData.streamUrl
+                if not streamUrl then _musicDownloading = false; return end
+                if MusicPlayer then
+                    pcall(function() MusicPlayer:Stop() MusicPlayer:Destroy() end)
+                    MusicPlayer = nil
+                end
+                pcall(function() makefolder("ember music") end)
+                local localAsset = nil
+                local okDl, body = pcall(function()
+                    local fn = request or http_request or (http and http.request) or (syn and syn.request)
+                    if not fn then return nil end
+                    local r = fn({Url = streamUrl, Method = "GET"})
+                    return r and r.Body
+                end)
+                if okDl and body and #body > 10000 and writefile then
+                    local okWrite = pcall(writefile, "ember music/music_listener.mp3", body)
+                    if okWrite then
+                        task.wait(0.15)
+                        pcall(function()
+                            localAsset = getcustomasset("ember music/music_listener.mp3")
+                        end)
+                    end
+                end
+                if localAsset then
+                    pcall(function()
+                        MusicPlayer = Instance.new("Sound")
+                        MusicPlayer.Parent = SoundService
+                        MusicPlayer.Name = "EmberMusicListener"
+                        MusicPlayer.SoundId = localAsset
+                        MusicPlayer.Volume = currentVolume
+                        MusicPlayer:Play()
+                        CurrentTrack = trackData
+                    end)
+                end
+                _musicDownloading = false
+            end)
+        end
+    end)
+end
+
+local function scrapeClientId()
+    local fn = request or http_request or (http and http.request) or (syn and syn.request)
+    if not fn then return nil end
+    local headers = {
+        ["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Referer = "https://soundcloud.com/",
+        Accept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    local ok, res = pcall(fn, {Url = "https://soundcloud.com", Method = "GET", Headers = headers})
+    if not ok or not res or not res.Body then return nil end
+    local bundles = {}
+    for match in string.gmatch(res.Body, "<script[^>]->") do
+        local src = string.match(match, "src=\"([^\"]+)\"")
+        if src and (string.find(src, "assets",1,true) or string.find(src, "a%-v2",1) or string.find(src, "sndcdn",1,true)) then
+            table.insert(bundles, src)
+        end
+    end
+    for _, url in ipairs(bundles) do
+        local ok2, r2 = pcall(fn, {Url = url, Method = "GET", Headers = headers})
+        if ok2 and r2 and r2.Body then
+            for _, pat in ipairs({
+                "client_id[:=]\"(%w+)\"",
+                "client_id[:=]'(%w+)'",
+                "client_id=(%w+)&",
+                "\"client_id\":\"(%w+)\"",
+            }) do
+                for m in string.gmatch(r2.Body, pat) do
+                    if #m >= 16 and #m <= 40 then
+                        return m
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function getScClientId(force)
+    if not force and os.time() - _scRefreshCooldown < 10 then
+        return _scClientId
+    end
+    _scRefreshCooldown = os.time()
+    local ok, newId = pcall(scrapeClientId)
+    if ok and newId and newId ~= _scClientId then
+        _scClientId = newId
+    end
+    return _scClientId
+end
+
+local function scFetch(url, retry)
+    local fn = request or http_request or (http and http.request) or (syn and syn.request)
+    if not fn then return nil end
+    local ok, res = pcall(fn, {Url = url, Method = "GET"})
+    if ok and res and res.Body and #res.Body > 0 then
+        return res.Body
+    end
+    if not retry and url:find("client_id=") and url:find(_scClientId,1,true) then
+        local old = _scClientId
+        local new = getScClientId(true)
+        if new and new ~= old then
+            return scFetch(url:gsub(old, new), true)
+        end
+    end
+    return nil
+end
+
+-- ============================================================
+-- UI
+-- ============================================================
+local ScreenGui = Instance.new("ScreenGui", game:GetService("CoreGui"))
+ScreenGui.Name = "EmberRechat_V53"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+local isGuiLocked = false
+local FloatBtn = nil
+
+local function showNotif(msg)
+    local notif = Instance.new("Frame", ScreenGui)
+    notif.Size = UDim2.new(0, 320, 0, 42)
+    notif.Position = UDim2.new(0.5, -160, 0, -50)
+    notif.BackgroundColor3 = EmberTheme.headerBg
+    notif.BorderSizePixel = 0
+    Instance.new("UICorner", notif).CornerRadius = UDim.new(0, 12)
+    local st = Instance.new("UIStroke", notif)
+    st.Color = Color3.fromRGB(255,255,255); st.Thickness = 1; st.Transparency = 0.5
+    local lbl = Instance.new("TextLabel", notif)
+    lbl.Size = UDim2.new(1, -16, 1, 0); lbl.Position = UDim2.new(0, 8, 0, 0)
+    lbl.BackgroundTransparency = 1; lbl.RichText = true
+    lbl.Text = msg
+    lbl.Font = Enum.Font.GothamBold; lbl.TextSize = 12
+    lbl.TextColor3 = Color3.fromRGB(255,255,255)
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.TextTruncate = Enum.TextTruncate.AtEnd
+    TweenService:Create(notif, TweenInfo.new(0.3, Enum.EasingStyle.Back), {
+        Position = UDim2.new(0.5, -160, 0, 6)
+    }):Play()
+    task.delay(3, function()
+        if notif and notif.Parent then
+            TweenService:Create(notif, TweenInfo.new(0.25), {
+                Position = UDim2.new(0.5, -160, 0, -50)
+            }):Play()
+            task.delay(0.3, function() if notif and notif.Parent then notif:Destroy() end end)
+        end
+    end)
+end
+
+local Main = Instance.new("Frame", ScreenGui)
+Main.Size = UDim2.new(0, 374, 0, 360)
+Main.Position = UDim2.new(0.5, 0, 0.4, 0)
+Main.AnchorPoint = Vector2.new(0.5, 0.5)
+Main.BackgroundColor3 = EmberTheme.mainBg
+Main.BorderSizePixel = 0
+Main.Active = true
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 16)
+
+local MainStroke = Instance.new("UIStroke", Main)
+MainStroke.Color = EmberTheme.accent
+MainStroke.Thickness = 1.5
+
+task.spawn(function()
+    while Main and Main.Parent do
+        local hue = (tick() % 6) / 6
+        MainStroke.Color = Color3.fromHSV(0.54 + hue * 0.12, 0.85, 0.95)
+        task.wait(0.05)
+    end
+end)
+
+do
+    local dragging, dragStart, startPos = false, nil, nil
+    Main.InputBegan:Connect(function(inp)
+        if isGuiLocked then return end
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+            dragging = true; dragStart = inp.Position; startPos = Main.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(inp)
+        if isGuiLocked then dragging = false; return end
+        if dragging and (inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch) then
+            local delta = inp.Position - dragStart
+            Main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
+
+local Header = Instance.new("Frame", Main)
+Header.Size = UDim2.new(1, 0, 0, 38)
+Header.BackgroundColor3 = EmberTheme.headerBg
+Header.BorderSizePixel = 0
+Instance.new("UICorner", Header).CornerRadius = UDim.new(0, 16)
+local HeaderFix = Instance.new("Frame", Header)
+HeaderFix.Size = UDim2.new(1, 0, 0.5, 0)
+HeaderFix.Position = UDim2.new(0, 0, 0.5, 0)
+HeaderFix.BackgroundColor3 = EmberTheme.headerBg
+HeaderFix.BorderSizePixel = 0
+
+local TitleLabel = Instance.new("TextLabel", Header)
+TitleLabel.Size = UDim2.new(1, -130, 1, 0)
+TitleLabel.Position = UDim2.new(0, 24, 0, 0)
+TitleLabel.Text = "✦ EMBER RECHAT ✦"
+TitleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.Font = Enum.Font.GothamBold
+TitleLabel.TextSize = 13
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.RichText = true
+TitleLabel.ZIndex = 2
+
+task.spawn(function()
+    while TitleLabel and TitleLabel.Parent do
+        local hue = (tick() % 3) / 3
+        local c1 = Color3.fromHSV(hue, 1, 1)
+        local c2 = Color3.fromHSV((hue + 0.4) % 1, 1, 1)
+        local r1,g1,b1 = math.floor(c1.R*255), math.floor(c1.G*255), math.floor(c1.B*255)
+        local r2,g2,b2 = math.floor(c2.R*255), math.floor(c2.G*255), math.floor(c2.B*255)
+        TitleLabel.Text = string.format("<font color='rgb(%d,%d,%d)'>✦</font> <font color='rgb(%d,%d,%d)'>EMBER</font> <font color='rgb(%d,%d,%d)'>RECHAT</font> <font color='rgb(%d,%d,%d)'>✦</font>", r1,g1,b1, r2,g2,b2, r1,g1,b1)
+        task.wait(0.1)
+    end
+end)
+
+local LockBtn = Instance.new("TextButton", Header)
+LockBtn.Size = UDim2.new(0, 26, 0, 26)
+LockBtn.Position = UDim2.new(1, -66, 0.5, -13)
+LockBtn.Text = "🔓"; LockBtn.Font = Enum.Font.GothamBold; LockBtn.TextSize = 12
+LockBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+LockBtn.BackgroundColor3 = EmberTheme.accent
+LockBtn.BorderSizePixel = 0; LockBtn.ZIndex = 3
+Instance.new("UICorner", LockBtn).CornerRadius = UDim.new(1, 0)
+
+LockBtn.MouseButton1Click:Connect(function()
+    isGuiLocked = not isGuiLocked
+    LockBtn.Text = isGuiLocked and "🔒" or "🔓"
+    LockBtn.BackgroundColor3 = isGuiLocked and Color3.fromRGB(200, 60, 60) or EmberTheme.accent
+    pcall(function() Main.Active = not isGuiLocked end)
+    if FloatBtn then pcall(function() FloatBtn.Active = not isGuiLocked end) end
+    showNotif(isGuiLocked and "🔒 GUI + Icon Locked" or "🔓 GUI + Icon Unlocked")
+end)
+
+local MinBtn = Instance.new("TextButton", Header)
+MinBtn.Size = UDim2.new(0, 26, 0, 26)
+MinBtn.Position = UDim2.new(1, -36, 0.5, -13)
+MinBtn.Text = "—"; MinBtn.Font = Enum.Font.GothamBold; MinBtn.TextSize = 13
+MinBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+MinBtn.BackgroundColor3 = EmberTheme.accent
+MinBtn.BorderSizePixel = 0; MinBtn.ZIndex = 3
+Instance.new("UICorner", MinBtn).CornerRadius = UDim.new(1, 0)
+
+local TabBar = Instance.new("Frame", Main)
+TabBar.Size = UDim2.new(1, -10, 0, 26)
+TabBar.Position = UDim2.new(0, 5, 0, 42)
+TabBar.BackgroundTransparency = 1
+local TabLayout = Instance.new("UIListLayout", TabBar)
+TabLayout.FillDirection = Enum.FillDirection.Horizontal
+TabLayout.SortOrder = Enum.SortOrder.LayoutOrder
+TabLayout.Padding = UDim.new(0, 3)
+
+local function MakeTabBtn(label, icon, order)
+    local btn = Instance.new("TextButton", TabBar)
+    btn.Text = icon.." "..label
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 8
+    btn.TextColor3 = EmberTheme.accent
+    btn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    btn.BackgroundTransparency = 0.3
+    btn.BorderSizePixel = 0
+    btn.LayoutOrder = order
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+    return btn
+end
+
+local isAdmin = isOwner or MyPanelAccess
+local tabCount = isAdmin and 5 or 4
+local _tabW = math.floor((362 - (tabCount - 1) * 3) / tabCount)
+
+local ChatTabBtn = MakeTabBtn("CHAT", "💬", 1)
+ChatTabBtn.Size = UDim2.new(0, _tabW, 1, 0)
+
+local MusicTabBtn = nil
+if isAdmin then
+    MusicTabBtn = MakeTabBtn("MUSIC", "🎵", 2)
+    MusicTabBtn.Size = UDim2.new(0, _tabW, 1, 0)
+end
+
+local PFPTabBtn = MakeTabBtn("PFP", "🖼️", isAdmin and 3 or 2)
+PFPTabBtn.Size = UDim2.new(0, _tabW, 1, 0)
+
+local ThemeTabBtn = MakeTabBtn("THEME", "🎨", isAdmin and 4 or 3)
+ThemeTabBtn.Size = UDim2.new(0, _tabW, 1, 0)
+
+local AdminTabBtn
+if isAdmin then
+    AdminTabBtn = MakeTabBtn("PANEL", "⚙", 5)
+    AdminTabBtn.Size = UDim2.new(0, _tabW, 1, 0)
+end
+
+local function setTabActive(btn)
+    for _, b in ipairs(TabBar:GetChildren()) do
+        if b:IsA("TextButton") then
+            b.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+            b.BackgroundTransparency = 0.3
+            b.TextColor3 = EmberTheme.accent
+        end
+    end
+    btn.BackgroundColor3 = EmberTheme.accent
+    btn.BackgroundTransparency = 0
+    btn.TextColor3 = Color3.new(1, 1, 1)
+end
+
+local Pages = Instance.new("Frame", Main)
+Pages.Size = UDim2.new(1, 0, 1, -110)
+Pages.Position = UDim2.new(0, 0, 0, 70)
+Pages.BackgroundTransparency = 1
+Pages.ClipsDescendants = true
+
+local ChatPage = Instance.new("Frame", Pages)
+ChatPage.Size = UDim2.new(1, 0, 1, 0)
+ChatPage.BackgroundTransparency = 1
+
+local ChatLog = Instance.new("ScrollingFrame", ChatPage)
+ChatLog.Size = UDim2.new(1, -10, 1, -4)
+ChatLog.Position = UDim2.new(0, 5, 0, 2)
+ChatLog.BackgroundTransparency = 1
+ChatLog.ScrollBarThickness = 3
+ChatLog.ScrollBarImageColor3 = EmberTheme.accent
+ChatLog.AutomaticCanvasSize = Enum.AutomaticSize.Y
+ChatLog.CanvasSize = UDim2.new(0, 0, 0, 0)
+local UIList = Instance.new("UIListLayout", ChatLog)
+UIList.Padding = UDim.new(0, 4)
+UIList.SortOrder = Enum.SortOrder.LayoutOrder
+
+local userScrolledUp = false
+local lastCanvasY = 0
+
+ChatLog:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+    local canvas = ChatLog.CanvasPosition.Y
+    local maxY = ChatLog.AbsoluteCanvasSize.Y - ChatLog.AbsoluteSize.Y
+    if maxY <= 0 then
+        userScrolledUp = false
+    else
+        if canvas >= maxY - 10 then
+            userScrolledUp = false
+        elseif canvas < lastCanvasY - 15 then
+            userScrolledUp = true
+        end
+    end
+    lastCanvasY = canvas
+end)
+
+local t25 = {
+    value84=nil, value85=nil, value86=nil, value87=nil, value88=nil,
+    value89=nil, value90=nil, value91=nil, value92=nil, value95=nil,
+    value96=nil, value97=nil, value81=nil, value82=nil, value83=nil,
+    value138={}, value139=0, value140=nil, value141=false, value142=false,
+    value143=false, value144=0, value146=nil, value147=false, value148=false,
+    value153=false, value154="",
+    value168=function() end, value165=function() end, value166=function() end,
+    value167=function() end, value169=function() end, value173=function() end,
+}
+
+local MusicPage = Instance.new("Frame", Pages)
+MusicPage.Size = UDim2.new(1, 0, 1, 0)
+MusicPage.BackgroundTransparency = 1
+MusicPage.Visible = false
+
+local MusicSearchFrame = Instance.new("Frame", MusicPage)
+MusicSearchFrame.Size = UDim2.new(1, -10, 0, 34)
+MusicSearchFrame.Position = UDim2.new(0, 5, 0, 4)
+MusicSearchFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+MusicSearchFrame.BackgroundTransparency = 0.2
+MusicSearchFrame.BorderSizePixel = 0
+Instance.new("UICorner", MusicSearchFrame).CornerRadius = UDim.new(0, 8)
+
+t25.value81 = Instance.new("TextBox", MusicSearchFrame)
+t25.value81.Size = UDim2.new(1, -70, 1, 0)
+t25.value81.Position = UDim2.new(0, 8, 0, 0)
+t25.value81.BackgroundTransparency = 1
+t25.value81.PlaceholderText = "Search SoundCloud..."
+t25.value81.PlaceholderColor3 = EmberTheme.accent
+t25.value81.Text = ""
+t25.value81.TextColor3 = EmberTheme.text
+t25.value81.Font = Enum.Font.Gotham
+t25.value81.TextSize = 11
+t25.value81.ClearTextOnFocus = false
+
+t25.value82 = Instance.new("TextButton", MusicSearchFrame)
+t25.value82.Size = UDim2.new(0, 50, 1, -6)
+t25.value82.Position = UDim2.new(1, -55, 0, 3)
+t25.value82.BackgroundColor3 = EmberTheme.accent
+t25.value82.BorderSizePixel = 0
+t25.value82.Text = "🔍"
+t25.value82.TextColor3 = Color3.new(1, 1, 1)
+t25.value82.Font = Enum.Font.GothamBold
+t25.value82.TextSize = 14
+Instance.new("UICorner", t25.value82).CornerRadius = UDim.new(0, 6)
+
+t25.value86 = Instance.new("ScrollingFrame", MusicPage)
+t25.value86.Size = UDim2.new(1, -10, 1, -90)
+t25.value86.Position = UDim2.new(0, 5, 0, 42)
+t25.value86.BackgroundTransparency = 1
+t25.value86.ScrollBarThickness = 3
+t25.value86.ScrollBarImageColor3 = EmberTheme.accent
+t25.value86.AutomaticCanvasSize = Enum.AutomaticSize.Y
+Instance.new("UIListLayout", t25.value86).Padding = UDim.new(0, 4)
+
+local NowPlayingFrame = Instance.new("Frame", MusicPage)
+NowPlayingFrame.Size = UDim2.new(1, -10, 0, 42)
+NowPlayingFrame.Position = UDim2.new(0, 5, 1, -46)
+NowPlayingFrame.BackgroundColor3 = EmberTheme.accent
+NowPlayingFrame.BackgroundTransparency = 0.1
+NowPlayingFrame.BorderSizePixel = 0
+NowPlayingFrame.Visible = false
+Instance.new("UICorner", NowPlayingFrame).CornerRadius = UDim.new(0, 8)
+
+t25.value87 = Instance.new("TextLabel", NowPlayingFrame)
+t25.value87.Size = UDim2.new(1, -10, 0, 16)
+t25.value87.Position = UDim2.new(0, 5, 0, 2)
+t25.value87.BackgroundTransparency = 1
+t25.value87.Text = "🎵 No song selected"
+t25.value87.TextColor3 = Color3.new(1, 1, 1)
+t25.value87.Font = Enum.Font.GothamBold
+t25.value87.TextSize = 9
+t25.value87.TextXAlignment = Enum.TextXAlignment.Left
+t25.value87.TextTruncate = Enum.TextTruncate.AtEnd
+
+t25.value88 = Instance.new("TextLabel", NowPlayingFrame)
+t25.value88.Size = UDim2.new(1, -10, 0, 12)
+t25.value88.Position = UDim2.new(0, 5, 0, 17)
+t25.value88.BackgroundTransparency = 1
+t25.value88.Text = "Duration: 0:00"
+t25.value88.TextColor3 = Color3.fromRGB(200, 220, 255)
+t25.value88.Font = Enum.Font.Gotham
+t25.value88.TextSize = 8
+t25.value88.TextXAlignment = Enum.TextXAlignment.Left
+
+t25.value95 = Instance.new("TextLabel", NowPlayingFrame)
+t25.value95.Size = UDim2.new(0, 35, 0, 10)
+t25.value95.Position = UDim2.new(0, 5, 1, -12)
+t25.value95.BackgroundTransparency = 1
+t25.value95.Text = "0:00"
+t25.value95.TextColor3 = Color3.fromRGB(180, 200, 230)
+t25.value95.Font = Enum.Font.Gotham
+t25.value95.TextSize = 8
+t25.value95.Visible = false
+
+t25.value96 = Instance.new("TextLabel", NowPlayingFrame)
+t25.value96.Size = UDim2.new(0, 35, 0, 10)
+t25.value96.Position = UDim2.new(1, -40, 1, -12)
+t25.value96.BackgroundTransparency = 1
+t25.value96.Text = "0:00"
+t25.value96.TextColor3 = Color3.fromRGB(180, 200, 230)
+t25.value96.Font = Enum.Font.Gotham
+t25.value96.TextSize = 8
+t25.value96.Visible = false
+
+t25.value90 = Instance.new("Frame", NowPlayingFrame)
+t25.value90.Size = UDim2.new(1, -100, 0, 4)
+t25.value90.Position = UDim2.new(0, 45, 1, -9)
+t25.value90.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+t25.value90.BackgroundTransparency = 0.5
+t25.value90.BorderSizePixel = 0
+t25.value90.Visible = false
+Instance.new("UICorner", t25.value90).CornerRadius = UDim.new(1, 0)
+
+t25.value91 = Instance.new("Frame", t25.value90)
+t25.value91.Size = UDim2.new(0, 0, 1, 0)
+t25.value91.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+t25.value91.BorderSizePixel = 0
+Instance.new("UICorner", t25.value91).CornerRadius = UDim.new(1, 0)
+
+t25.value92 = Instance.new("Frame", t25.value90)
+t25.value92.Size = UDim2.new(0, 8, 0, 8)
+t25.value92.Position = UDim2.new(0, 0, 0.5, -4)
+t25.value92.BackgroundColor3 = Color3.new(1, 1, 1)
+t25.value92.BorderSizePixel = 0
+t25.value92.Visible = false
+Instance.new("UICorner", t25.value92).CornerRadius = UDim.new(1, 0)
+
+t25.value89 = Instance.new("TextButton", NowPlayingFrame)
+t25.value89.Size = UDim2.new(0, 95, 0, 22)
+t25.value89.Position = UDim2.new(1, -100, 0, 2)
+t25.value89.BackgroundColor3 = Color3.fromRGB(30, 215, 96)
+t25.value89.TextColor3 = Color3.new(1, 1, 1)
+t25.value89.Text = "▶ Play & Broadcast"
+t25.value89.Font = Enum.Font.GothamBold
+t25.value89.TextSize = 9
+t25.value89.ZIndex = 2
+Instance.new("UICorner", t25.value89).CornerRadius = UDim.new(0, 5)
+
+local StopMusicBtn = Instance.new("TextButton", NowPlayingFrame)
+StopMusicBtn.Size = UDim2.new(0, 45, 0, 18)
+StopMusicBtn.Position = UDim2.new(1, -50, 1, -20)
+StopMusicBtn.BackgroundColor3 = Color3.fromRGB(180, 30, 30)
+StopMusicBtn.TextColor3 = Color3.new(1, 1, 1)
+StopMusicBtn.Text = "⏹ Stop"
+StopMusicBtn.Font = Enum.Font.GothamBold
+StopMusicBtn.TextSize = 8
+Instance.new("UICorner", StopMusicBtn).CornerRadius = UDim.new(0, 5)
+
+local VolDownBtn = Instance.new("TextButton", NowPlayingFrame)
+VolDownBtn.Size = UDim2.new(0, 20, 0, 18)
+VolDownBtn.Position = UDim2.new(0, 5, 1, -20)
+VolDownBtn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+VolDownBtn.BackgroundTransparency = 0.3
+VolDownBtn.BorderSizePixel = 0
+VolDownBtn.Text = "🔉"
+VolDownBtn.TextColor3 = Color3.new(1, 1, 1)
+VolDownBtn.Font = Enum.Font.GothamBold
+VolDownBtn.TextSize = 10
+Instance.new("UICorner", VolDownBtn).CornerRadius = UDim.new(0, 5)
+
+t25.value97 = Instance.new("TextLabel", NowPlayingFrame)
+t25.value97.Size = UDim2.new(0, 35, 0, 18)
+t25.value97.Position = UDim2.new(0, 27, 1, -20)
+t25.value97.BackgroundTransparency = 1
+t25.value97.Text = "50%"
+t25.value97.TextColor3 = Color3.new(1, 1, 1)
+t25.value97.Font = Enum.Font.GothamBold
+t25.value97.TextSize = 8
+
+local VolUpBtn = Instance.new("TextButton", NowPlayingFrame)
+VolUpBtn.Size = UDim2.new(0, 20, 0, 18)
+VolUpBtn.Position = UDim2.new(0, 64, 1, -20)
+VolUpBtn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+VolUpBtn.BackgroundTransparency = 0.3
+VolUpBtn.BorderSizePixel = 0
+VolUpBtn.Text = "🔊"
+VolUpBtn.TextColor3 = Color3.new(1, 1, 1)
+VolUpBtn.Font = Enum.Font.GothamBold
+VolUpBtn.TextSize = 10
+Instance.new("UICorner", VolUpBtn).CornerRadius = UDim.new(0, 5)
+
+local PrevBtn = Instance.new("TextButton", NowPlayingFrame)
+PrevBtn.Size = UDim2.new(0, 24, 0, 18)
+PrevBtn.Position = UDim2.new(1, -80, 1, -20)
+PrevBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+PrevBtn.TextColor3 = Color3.new(1, 1, 1)
+PrevBtn.Text = "⏮"
+PrevBtn.Font = Enum.Font.GothamBold
+PrevBtn.TextSize = 10
+Instance.new("UICorner", PrevBtn).CornerRadius = UDim.new(0, 4)
+
+local NextBtn = Instance.new("TextButton", NowPlayingFrame)
+NextBtn.Size = UDim2.new(0, 24, 0, 18)
+NextBtn.Position = UDim2.new(1, -52, 1, -20)
+NextBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+NextBtn.TextColor3 = Color3.new(1, 1, 1)
+NextBtn.Text = "⏭"
+NextBtn.Font = Enum.Font.GothamBold
+NextBtn.TextSize = 10
+Instance.new("UICorner", NextBtn).CornerRadius = UDim.new(0, 4)
+
+VolDownBtn.MouseButton1Click:Connect(function()
+    currentVolume = math.max(0, currentVolume - 0.1)
+    t25.value97.Text = math.floor(currentVolume * 100).."%"
+    if MusicPlayer then MusicPlayer.Volume = currentVolume end
+end)
+VolUpBtn.MouseButton1Click:Connect(function()
+    currentVolume = math.min(1, currentVolume + 0.1)
+    t25.value97.Text = math.floor(currentVolume * 100).."%"
+    if MusicPlayer then MusicPlayer.Volume = currentVolume end
+end)
+
+local PFPPAGEPage = Instance.new("Frame", Pages)
+PFPPAGEPage.Size = UDim2.new(1, 0, 1, 0)
+PFPPAGEPage.BackgroundTransparency = 1
+PFPPAGEPage.Visible = false
+
+local PFPInfo = Instance.new("TextLabel", PFPPAGEPage)
+PFPInfo.Size = UDim2.new(1, -10, 0, 20)
+PFPInfo.Position = UDim2.new(0, 5, 0, 2)
+PFPInfo.BackgroundTransparency = 1
+PFPInfo.Text = "🖼️ Tap avatar to set your PFP"
+PFPInfo.TextColor3 = EmberTheme.text
+PFPInfo.Font = Enum.Font.GothamBold
+PFPInfo.TextSize = 10
+PFPInfo.TextXAlignment = Enum.TextXAlignment.Left
+
+local PFPScroll = Instance.new("ScrollingFrame", PFPPAGEPage)
+PFPScroll.Size = UDim2.new(1, -10, 1, -50)
+PFPScroll.Position = UDim2.new(0, 5, 0, 26)
+PFPScroll.BackgroundTransparency = 1
+PFPScroll.ScrollBarThickness = 3
+PFPScroll.ScrollBarImageColor3 = EmberTheme.accent
+PFPScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+
+local PFPCustomFrame = Instance.new("Frame", PFPPAGEPage)
+PFPCustomFrame.Size = UDim2.new(1, -10, 0, 30)
+PFPCustomFrame.Position = UDim2.new(0, 5, 1, -34)
+PFPCustomFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+PFPCustomFrame.BackgroundTransparency = 0.2
+PFPCustomFrame.BorderSizePixel = 0
+Instance.new("UICorner", PFPCustomFrame).CornerRadius = UDim.new(0, 6)
+
+local PFPCustomInput = Instance.new("TextBox", PFPCustomFrame)
+PFPCustomInput.Size = UDim2.new(1, -70, 1, 0)
+PFPCustomInput.Position = UDim2.new(0, 8, 0, 0)
+PFPCustomInput.BackgroundTransparency = 1
+PFPCustomInput.PlaceholderText = "Or paste Roblox asset ID..."
+PFPCustomInput.PlaceholderColor3 = Color3.fromRGB(150, 170, 200)
+PFPCustomInput.Text = ""
+PFPCustomInput.TextColor3 = EmberTheme.text
+PFPCustomInput.Font = Enum.Font.Gotham
+PFPCustomInput.TextSize = 10
+PFPCustomInput.ClearTextOnFocus = false
+
+local PFPCustomBtn = Instance.new("TextButton", PFPCustomFrame)
+PFPCustomBtn.Size = UDim2.new(0, 56, 1, -6)
+PFPCustomBtn.Position = UDim2.new(1, -60, 0, 3)
+PFPCustomBtn.BackgroundColor3 = EmberTheme.accent
+PFPCustomBtn.BorderSizePixel = 0
+PFPCustomBtn.Text = "SET"
+PFPCustomBtn.TextColor3 = Color3.new(1, 1, 1)
+PFPCustomBtn.Font = Enum.Font.GothamBold
+PFPCustomBtn.TextSize = 10
+Instance.new("UICorner", PFPCustomBtn).CornerRadius = UDim.new(0, 6)
+
+local PFP_GALLERY = {
+    {name="Dark Bun",     id="rbxassetid://7733960981"},
+    {name="Monster",      id="rbxassetid://7733991422"},
+    {name="Purple Lips",  id="rbxassetid://7734037061"},
+    {name="Peace Sign",   id="rbxassetid://7734068321"},
+    {name="Pink Bow",     id="rbxassetid://7734078648"},
+    {name="Star Boy",     id="rbxassetid://7734088950"},
+    {name="X Scar",       id="rbxassetid://7734107163"},
+    {name="Blue Flame",   id="rbxassetid://7734127293"},
+    {name="Blue Eyes",    id="rbxassetid://7734141256"},
+    {name="Purple Laugh", id="rbxassetid://7734152943"},
+    {name="Red Glitch",   id="rbxassetid://7734164429"},
+    {name="Shiva",        id="rbxassetid://7734176273"},
+    {name="Shiba",        id="rbxassetid://7734189060"},
+    {name="Dog Grin",     id="rbxassetid://7734200680"},
+    {name="Kitten Rose",  id="rbxassetid://7734212794"},
+    {name="Extra",        id="rbxassetid://7734225163"},
+}
+
+local PFPGrid = Instance.new("Frame", PFPScroll)
+PFPGrid.Size = UDim2.new(1, 0, 0, 500)
+PFPGrid.BackgroundTransparency = 1
+local pfpGridLayout = Instance.new("UIGridLayout", PFPGrid)
+pfpGridLayout.CellSize = UDim2.new(0, 68, 0, 90)
+pfpGridLayout.CellPadding = UDim2.new(0, 6, 0, 6)
+pfpGridLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local function applyPFP(assetId, name)
+    savePFP(RealUserId, assetId)
+    CustomPFP[RealUserId] = assetId
+    showNotif("✅ PFP set: "..(name or "custom"))
+end
+
+for i, pfp in ipairs(PFP_GALLERY) do
+    local cell = Instance.new("Frame", PFPGrid)
+    cell.BackgroundTransparency = 1
+    cell.LayoutOrder = i
+
+    local btn = Instance.new("TextButton", cell)
+    btn.Size = UDim2.new(1, 0, 0, 68)
+    btn.BackgroundColor3 = EmberTheme.accent
+    btn.BackgroundTransparency = 0.2
+    btn.BorderSizePixel = 0
+    btn.Text = ""
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 10)
+    local bst = Instance.new("UIStroke", btn)
+    bst.Color = Color3.fromRGB(255, 255, 255); bst.Thickness = 1; bst.Transparency = 0.5
+
+    local img = Instance.new("ImageLabel", btn)
+    img.Size = UDim2.new(1, -4, 1, -4)
+    img.Position = UDim2.new(0, 2, 0, 2)
+    img.BackgroundTransparency = 1
+    img.Image = pfp.id
+    Instance.new("UICorner", img).CornerRadius = UDim.new(0, 8)
+
+    local nameLbl = Instance.new("TextLabel", cell)
+    nameLbl.Size = UDim2.new(1, 0, 0, 16)
+    nameLbl.Position = UDim2.new(0, 0, 0, 70)
+    nameLbl.BackgroundTransparency = 1
+    nameLbl.Text = pfp.name
+    nameLbl.TextColor3 = EmberTheme.text
+    nameLbl.Font = Enum.Font.Gotham
+    nameLbl.TextSize = 8
+    nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+
+    btn.MouseButton1Click:Connect(function()
+        applyPFP(pfp.id, pfp.name)
+    end)
+end
+
+PFPCustomBtn.MouseButton1Click:Connect(function()
+    local txt = PFPCustomInput.Text:gsub("%s+", "")
+    if txt == "" then return end
+    local asset
+    if txt:find("rbxassetid://") then asset = txt else asset = "rbxassetid://"..txt end
+    applyPFP(asset, "custom")
+    PFPCustomInput.Text = ""
+end)
+
+local ThemePage = Instance.new("Frame", Pages)
+ThemePage.Size = UDim2.new(1, 0, 1, 0)
+ThemePage.BackgroundTransparency = 1
+ThemePage.Visible = false
+
+local ThemeInfo = Instance.new("TextLabel", ThemePage)
+ThemeInfo.Size = UDim2.new(1, -10, 0, 24)
+ThemeInfo.Position = UDim2.new(0, 5, 0, 4)
+ThemeInfo.BackgroundTransparency = 1
+ThemeInfo.Text = "🎨 CHOOSE EMBER COLOR"
+ThemeInfo.TextColor3 = EmberTheme.text
+ThemeInfo.Font = Enum.Font.GothamBold
+ThemeInfo.TextSize = 11
+ThemeInfo.TextXAlignment = Enum.TextXAlignment.Left
+
+local ThemeColors = {
+    {name="Sky Blue", main=Color3.fromRGB(200,230,255), header=Color3.fromRGB(100,185,255), accent=Color3.fromRGB(60,140,255)},
+    {name="Pink", main=Color3.fromRGB(255,220,240), header=Color3.fromRGB(255,130,180), accent=Color3.fromRGB(255,80,150)},
+    {name="Purple", main=Color3.fromRGB(225,210,255), header=Color3.fromRGB(160,120,255), accent=Color3.fromRGB(130,80,255)},
+    {name="Green", main=Color3.fromRGB(210,255,220), header=Color3.fromRGB(80,200,120), accent=Color3.fromRGB(50,170,90)},
+    {name="Red", main=Color3.fromRGB(255,215,215), header=Color3.fromRGB(230,90,90), accent=Color3.fromRGB(210,50,50)},
+    {name="Orange", main=Color3.fromRGB(255,235,210), header=Color3.fromRGB(255,160,70), accent=Color3.fromRGB(240,130,30)},
+    {name="Dark", main=Color3.fromRGB(45,45,60), header=Color3.fromRGB(30,30,45), accent=Color3.fromRGB(100,140,255)},
+    {name="Gold", main=Color3.fromRGB(255,245,210), header=Color3.fromRGB(220,180,50), accent=Color3.fromRGB(200,160,30)},
+    {name="Cyan", main=Color3.fromRGB(210,250,255), header=Color3.fromRGB(60,200,220), accent=Color3.fromRGB(30,180,200)},
+    {name="Lavender", main=Color3.fromRGB(240,230,255), header=Color3.fromRGB(190,160,240), accent=Color3.fromRGB(160,120,220)},
+    {name="Mint", main=Color3.fromRGB(220,255,240), header=Color3.fromRGB(100,220,180), accent=Color3.fromRGB(60,190,150)},
+    {name="Rose", main=Color3.fromRGB(255,225,230), header=Color3.fromRGB(230,120,140), accent=Color3.fromRGB(210,80,110)},
+}
+
+local ThemeGrid = Instance.new("Frame", ThemePage)
+ThemeGrid.Size = UDim2.new(1, -10, 1, -40)
+ThemeGrid.Position = UDim2.new(0, 5, 0, 32)
+ThemeGrid.BackgroundTransparency = 1
+
+local TGList = Instance.new("UIListLayout", ThemeGrid)
+TGList.FillDirection = Enum.FillDirection.Horizontal
+TGList.Padding = UDim.new(0, 5)
+TGList.SortOrder = Enum.SortOrder.LayoutOrder
+TGList.Wraps = true
+
+local function applyEmberTheme(t)
+    EmberTheme.mainBg = t.main
+    EmberTheme.headerBg = t.header
+    EmberTheme.accent = t.accent
+    Main.BackgroundColor3 = t.main
+    Header.BackgroundColor3 = t.header
+    HeaderFix.BackgroundColor3 = t.header
+    t25.value82.BackgroundColor3 = t.accent
+    NowPlayingFrame.BackgroundColor3 = t.accent
+    PFPCustomBtn.BackgroundColor3 = t.accent
+    for _, b in ipairs(TabBar:GetChildren()) do
+        if b:IsA("TextButton") then b.TextColor3 = t.accent end
+    end
+    for _, b in ipairs(TabBar:GetChildren()) do
+        if b:IsA("TextButton") and b.BackgroundTransparency == 0 then
+            b.BackgroundColor3 = t.accent
+        end
+    end
+end
+
+for i, t in ipairs(ThemeColors) do
+    local tb = Instance.new("TextButton", ThemeGrid)
+    tb.Size = UDim2.new(0, 72, 0, 46)
+    tb.LayoutOrder = i
+    tb.BackgroundColor3 = t.header
+    tb.BorderSizePixel = 0
+    tb.Text = t.name
+    tb.TextColor3 = Color3.new(1, 1, 1)
+    tb.Font = Enum.Font.GothamBold
+    tb.TextSize = 9
+    tb.TextWrapped = true
+    Instance.new("UICorner", tb).CornerRadius = UDim.new(0, 8)
+    tb.MouseButton1Click:Connect(function()
+        applyEmberTheme(t)
+        saveTheme()
+        showNotif("🎨 Theme: "..t.name)
+    end)
+end
+
+local PanelPage = Instance.new("Frame", Pages)
+PanelPage.Size = UDim2.new(1, 0, 1, 0)
+PanelPage.BackgroundTransparency = 1
+PanelPage.Visible = false
+
+local PanelScroll = Instance.new("ScrollingFrame", PanelPage)
+PanelScroll.Size = UDim2.new(1, -10, 1, -4)
+PanelScroll.Position = UDim2.new(0, 5, 0, 2)
+PanelScroll.BackgroundTransparency = 1
+PanelScroll.ScrollBarThickness = 3
+PanelScroll.ScrollBarImageColor3 = EmberTheme.accent
+PanelScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+local PanelLayout = Instance.new("UIListLayout", PanelScroll)
+PanelLayout.Padding = UDim.new(0, 5)
+PanelLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+local function switchPage(page)
+    ChatPage.Visible = (page == "chat")
+    MusicPage.Visible = (page == "music" and isAdmin)
+    PFPPAGEPage.Visible = (page == "pfp")
+    ThemePage.Visible = (page == "theme")
+    PanelPage.Visible = (page == "panel" and isAdmin)
+end
+
+setTabActive(ChatTabBtn)
+ChatTabBtn.MouseButton1Click:Connect(function() setTabActive(ChatTabBtn); switchPage("chat") end)
+if MusicTabBtn then
+    MusicTabBtn.MouseButton1Click:Connect(function() setTabActive(MusicTabBtn); switchPage("music") end)
+end
+PFPTabBtn.MouseButton1Click:Connect(function() setTabActive(PFPTabBtn); switchPage("pfp") end)
+ThemeTabBtn.MouseButton1Click:Connect(function() setTabActive(ThemeTabBtn); switchPage("theme") end)
+if AdminTabBtn then
+    AdminTabBtn.MouseButton1Click:Connect(function() setTabActive(AdminTabBtn); switchPage("panel") end)
+end
+
+local Divider = Instance.new("Frame", Main)
+Divider.Size = UDim2.new(1, -10, 0, 1)
+Divider.Position = UDim2.new(0, 5, 1, -42)
+Divider.BackgroundColor3 = EmberTheme.accent
+Divider.BorderSizePixel = 0
+
+local ReplyBanner = Instance.new("Frame", Main)
+ReplyBanner.Size = UDim2.new(1, -10, 0, 20)
+ReplyBanner.Position = UDim2.new(0, 5, 1, -64)
+ReplyBanner.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+ReplyBanner.BackgroundTransparency = 0.2
+ReplyBanner.BorderSizePixel = 0
+ReplyBanner.Visible = false
+Instance.new("UICorner", ReplyBanner).CornerRadius = UDim.new(0, 6)
+
+local ReplyLabel = Instance.new("TextLabel", ReplyBanner)
+ReplyLabel.Size = UDim2.new(1, -30, 1, 0); ReplyLabel.Position = UDim2.new(0, 8, 0, 0)
+ReplyLabel.BackgroundTransparency = 1; ReplyLabel.Text = "Replying to ..."
+ReplyLabel.TextColor3 = EmberTheme.text; ReplyLabel.Font = Enum.Font.Gotham; ReplyLabel.TextSize = 10
+ReplyLabel.TextXAlignment = Enum.TextXAlignment.Left; ReplyLabel.TextTruncate = Enum.TextTruncate.AtEnd
+
+local ReplyClose = Instance.new("TextButton", ReplyBanner)
+ReplyClose.Size = UDim2.new(0, 20, 0, 20); ReplyClose.Position = UDim2.new(1, -22, 0, 0)
+ReplyClose.Text = "✕"; ReplyClose.Font = Enum.Font.GothamBold; ReplyClose.TextSize = 10
+ReplyClose.BackgroundTransparency = 1; ReplyClose.TextColor3 = EmberTheme.text
+ReplyClose.MouseButton1Click:Connect(function()
+    ReplyTargetName = nil; ReplyTargetMsg = nil; ReplyBanner.Visible = false
+end)
+
+local InputArea = Instance.new("Frame", Main)
+InputArea.Size = UDim2.new(1, -10, 0, 36)
+InputArea.Position = UDim2.new(0, 5, 1, -38)
+InputArea.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+InputArea.BackgroundTransparency = 0.2
+InputArea.BorderSizePixel = 0
+Instance.new("UICorner", InputArea).CornerRadius = UDim.new(0, 12)
+
+local Input = Instance.new("TextBox", InputArea)
+Input.Size = UDim2.new(1, -44, 1, 0); Input.Position = UDim2.new(0, 10, 0, 0)
+Input.BackgroundTransparency = 1; Input.PlaceholderText = "Message..."
+Input.Text = ""; Input.TextColor3 = EmberTheme.text
+Input.PlaceholderColor3 = Color3.fromRGB(150, 170, 200)
+Input.Font = Enum.Font.Gotham; Input.TextSize = 11; Input.ClearTextOnFocus = false
+
+local SendBtn = Instance.new("TextButton", InputArea)
+SendBtn.Size = UDim2.new(0, 32, 0, 28); SendBtn.Position = UDim2.new(1, -36, 0.5, -14)
+SendBtn.BackgroundColor3 = EmberTheme.accent; SendBtn.BorderSizePixel = 0
+SendBtn.Text = "▶"; SendBtn.TextColor3 = Color3.new(1, 1, 1)
+SendBtn.Font = Enum.Font.GothamBold; SendBtn.TextSize = 12
+Instance.new("UICorner", SendBtn).CornerRadius = UDim.new(0, 8)
+
+MinBtn.MouseButton1Click:Connect(function()
+    if Main.Size.Y.Offset == 360 then
+        TweenService:Create(Main, TweenInfo.new(0.25), {Size = UDim2.new(0, 374, 0, 44)}):Play()
+        MinBtn.Text = "▲"
+        Pages.Visible = false; TabBar.Visible = false
+        Divider.Visible = false; InputArea.Visible = false; ReplyBanner.Visible = false
+    else
+        TweenService:Create(Main, TweenInfo.new(0.25), {Size = UDim2.new(0, 374, 0, 360)}):Play()
+        MinBtn.Text = "—"
+        Pages.Visible = true; TabBar.Visible = true
+        Divider.Visible = true; InputArea.Visible = true
+    end
+end)
+
+local MsgPopup = Instance.new("Frame", ScreenGui)
+MsgPopup.Size = UDim2.new(0, 150, 0, 0)
+MsgPopup.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+MsgPopup.BackgroundTransparency = 0.1
+MsgPopup.BorderSizePixel = 0
+MsgPopup.ZIndex = 200
+MsgPopup.Visible = false
+MsgPopup.AutomaticSize = Enum.AutomaticSize.Y
+Instance.new("UICorner", MsgPopup).CornerRadius = UDim.new(0, 10)
+Instance.new("UIListLayout", MsgPopup).Padding = UDim.new(0, 0)
+
+local function closeMsgPopup() MsgPopup.Visible = false end
+
+local function addPopupItem(icon, label, order, destructive, callback)
+    local item = Instance.new("TextButton", MsgPopup)
+    item.Size = UDim2.new(1, 0, 0, 38); item.LayoutOrder = order
+    item.BackgroundTransparency = 1; item.Text = ""; item.ZIndex = 201
+    local ico = Instance.new("TextLabel", item); ico.Size = UDim2.new(0, 26, 1, 0); ico.Position = UDim2.new(0, 6, 0, 0)
+    ico.BackgroundTransparency = 1; ico.Text = icon; ico.TextSize = 14; ico.Font = Enum.Font.Gotham
+    ico.TextColor3 = destructive and Color3.fromRGB(220, 50, 50) or EmberTheme.accent; ico.ZIndex = 202
+    local lbl = Instance.new("TextLabel", item); lbl.Size = UDim2.new(1, -38, 1, 0); lbl.Position = UDim2.new(0, 34, 0, 0)
+    lbl.BackgroundTransparency = 1; lbl.Text = label; lbl.TextSize = 11; lbl.Font = Enum.Font.Gotham
+    lbl.TextColor3 = destructive and Color3.fromRGB(220, 50, 50) or EmberTheme.text
+    lbl.TextXAlignment = Enum.TextXAlignment.Left; lbl.ZIndex = 202
+    item.MouseButton1Click:Connect(function() closeMsgPopup(); task.spawn(callback) end)
+end
+
+local function showMsgPopup(screenPos, options)
+    for _, c in pairs(MsgPopup:GetChildren()) do if c:IsA("TextButton") then c:Destroy() end end
+    for i, opt in ipairs(options) do addPopupItem(opt.icon, opt.label, i, opt.destructive or false, opt.callback) end
+    local vpSize = game.Workspace.CurrentCamera.ViewportSize
+    local popH = #options * 38
+    local px = math.clamp(screenPos.X - 75, 4, vpSize.X - 154)
+    local py = screenPos.Y - popH - 10
+    if py < 4 then py = screenPos.Y + 10 end
+    py = math.clamp(py, 4, vpSize.Y - popH - 4)
+    MsgPopup.Position = UDim2.new(0, px, 0, py)
+    MsgPopup.Visible = true
+end
+
+UserInputService.InputBegan:Connect(function(inp)
+    if not MsgPopup.Visible then return end
+    if inp.UserInputType ~= Enum.UserInputType.MouseButton1 and inp.UserInputType ~= Enum.UserInputType.Touch then return end
+    local p = inp.Position; local abs = MsgPopup.AbsolutePosition; local sz = MsgPopup.AbsoluteSize
+    if p.X < abs.X or p.X > abs.X + sz.X or p.Y < abs.Y or p.Y > abs.Y + sz.Y then closeMsgPopup() end
+end)
+
+local function createBubble(player, msg, isPrivate)
+    if not player or not player.Character then return end
+    local char = player.Character
+    local head = char:FindFirstChild("Head")
+    if not head then return end
+    local existing = char:FindFirstChild("EmberBubble")
+    if existing then existing:Destroy() end
+    local bg = Instance.new("BillboardGui", head)
+    bg.Name = "EmberBubble"; bg.Size = UDim2.new(0, 180, 0, 40)
+    bg.StudsOffset = Vector3.new(0, 2.5, 0); bg.AlwaysOnTop = true
+    local lbl = Instance.new("TextLabel", bg)
+    lbl.Size = UDim2.new(1, 0, 1, 0); lbl.BackgroundColor3 = EmberTheme.accent
+    lbl.BackgroundTransparency = 0.1; lbl.BorderSizePixel = 0
+    local displayMsg = isPrivate and "🔒 "..msg or msg
+    lbl.Text = displayMsg:sub(1, 60); lbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+    lbl.Font = Enum.Font.Gotham; lbl.TextSize = 11; lbl.TextWrapped = true
+    Instance.new("UICorner", lbl).CornerRadius = UDim.new(0, 8)
+    task.delay(6, function() if bg and bg.Parent then bg:Destroy() end end)
+end
+
+local addMessage
+
+-- ============================================================
+-- ⭐ ARES-STYLE TRIM MESSAGES (FIXED - PURANE DELETE HOTE HAIN)
+-- ============================================================
+local function trimMessages()
+    if #messageOrder <= MAX_MESSAGES then return end
+    
+    local toRemove = #messageOrder - MAX_MESSAGES
+    for i = 1, toRemove do
+        local key = messageOrder[1]
+        if not key then break end
+        
+        table.remove(messageOrder, 1)
+        local entry = messageMap[key]
+        messageMap[key] = nil
+        
+        if entry and entry.frame and entry.frame.Parent then
+            -- Mark as deleted on Firebase (Ares-style IsDeleted flag)
+            task.spawn(function()
+                pcall(function()
+                    fbReq({
+                        Url = DATABASE_URL.."/"..key.."/IsDeleted.json",
+                        Method = "PUT",
+                        Headers = {["Content-Type"]="application/json"},
+                        Body = "true"
+                    })
+                end)
+            end)
+            
+            -- Animate old message deletion
+            local frame = entry.frame
+            local btn = entry.btn
+            if btn and btn.Parent then
+                TweenService:Create(btn, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                    BackgroundTransparency = 1,
+                    TextTransparency = 1
+                }):Play()
+            end
+            task.delay(0.26, function()
+                if frame and frame.Parent then
+                    frame:Destroy()
+                end
+            end)
+        end
+    end
+end
+
+addMessage = function(sender, msg, isSystem, order, senderUid, isPrivate, skipBubble, replyTo)
+    if MutedPlayers[senderUid] and senderUid ~= RealUserId then return end
+    isSystem = isSystem or false; isPrivate = isPrivate or false
+    order = order or 0; senderUid = senderUid or 0
+    local safeName = SafeEncodeMsg(sender)
+    local safeMsg = SafeEncodeMsg(msg)
+    local safeReply = replyTo and SafeEncodeMsg(replyTo) or ""
+
+    lastActivityTime = os.time()
+
+    local wasAtBottom = false
+    pcall(function()
+        local maxY = ChatLog.AbsoluteCanvasSize.Y - ChatLog.AbsoluteSize.Y
+        if maxY <= 0 then
+            wasAtBottom = true
+        else
+            wasAtBottom = (ChatLog.CanvasPosition.Y >= maxY - 20)
+        end
+    end)
+
+    local wrapperFrame = Instance.new("Frame", ChatLog)
+    wrapperFrame.BackgroundTransparency = 1; wrapperFrame.BorderSizePixel = 0
+    wrapperFrame.AutomaticSize = Enum.AutomaticSize.Y
+    wrapperFrame.Size = UDim2.new(1, 0, 0, 0)
+    wrapperFrame.LayoutOrder = order ~= 0 and order or os.time() * 1000
+
+    local pfpFrame = Instance.new("Frame", wrapperFrame)
+    pfpFrame.Size = UDim2.new(0, 26, 0, 26)
+    pfpFrame.Position = UDim2.new(0, 0, 0, 0)
+    pfpFrame.BackgroundColor3 = EmberTheme.accent
+    pfpFrame.BorderSizePixel = 0
+    Instance.new("UICorner", pfpFrame).CornerRadius = UDim.new(1, 0)
+    local pfpImg = Instance.new("ImageLabel", pfpFrame)
+    pfpImg.Size = UDim2.new(1, 0, 1, 0); pfpImg.BackgroundTransparency = 1
+    Instance.new("UICorner", pfpImg).CornerRadius = UDim.new(1, 0)
+    if not isSystem and senderUid ~= 0 then
+        if CustomPFP[senderUid] then
+            pfpImg.Image = CustomPFP[senderUid]
+        else
+            task.spawn(function()
+                pcall(function()
+                    local content, ready = Players:GetUserThumbnailAsync(senderUid, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size48x48)
+                    if ready and pfpImg and pfpImg.Parent then pfpImg.Image = content end
+                end)
+            end)
+        end
+    else
+        pfpImg.Image = "rbxassetid://7733960981"
+    end
+
+    local TextButton = Instance.new("TextButton", wrapperFrame)
+    TextButton.AutomaticSize = Enum.AutomaticSize.Y
+    TextButton.Size = UDim2.new(1, -32, 0, 0)
+    TextButton.Position = UDim2.new(0, 32, 0, 0)
+    TextButton.BackgroundColor3 = isSystem and Color3.fromRGB(255, 245, 220) or Color3.fromRGB(255, 255, 255)
+    TextButton.BackgroundTransparency = 0.15
+    TextButton.BorderSizePixel = 0
+    TextButton.AutoButtonColor = false
+    TextButton.RichText = true; TextButton.TextWrapped = true
+    TextButton.TextXAlignment = Enum.TextXAlignment.Left
+    TextButton.Font = Enum.Font.Gotham; TextButton.TextSize = 11
+    TextButton.TextColor3 = EmberTheme.text
+    TextButton.Text = ""; TextButton.ZIndex = 2
+    local _pad = Instance.new("UIPadding", TextButton)
+    _pad.PaddingLeft = UDim.new(0, 8); _pad.PaddingRight = UDim.new(0, 8)
+    _pad.PaddingTop = UDim.new(0, 5); _pad.PaddingBottom = UDim.new(0, 5)
+    Instance.new("UICorner", TextButton).CornerRadius = UDim.new(0, 9)
+
+    if isSystem then
+        TextButton.Text = "<font color='rgb(30,100,200)'><b>[SYSTEM]</b></font> "..safeMsg
+    else
+        local tagData = TagCache[senderUid] or {text="", type="Normal", tagTitle=nil, titleColor=nil}
+        if tagData.type == "Normal" then
+            local ct = CustomTitles[senderUid]
+            if ct and ct.expiresAt and ct.expiresAt > os.time() then
+                tagData = {text="["..ct.title.."] ", type="CustomTitle", tagTitle="["..ct.title.."]", titleColor=(ct.color == "RGB_ANIMATED") and "RGB" or ct.color}
+            end
+        end
+        if isPlayerOwner({Name=safeName, UserId=senderUid}) and tagData.type == "Normal" then
+            tagData = {text="[ᴏᴡɴᴇʀ] ", type="Owner", tagTitle="[ᴏᴡɴᴇʀ]"}
+        end
+
+        local privTag = isPrivate and "<font color='rgb(255,100,255)'>[PVT] </font>" or ""
+        local color = GetUserColor(safeName)
+        local colorStr = string.format("rgb(%d,%d,%d)",
+            math.clamp(math.floor(color.R*255),0,255),
+            math.clamp(math.floor(color.G*255),0,255),
+            math.clamp(math.floor(color.B*255),0,255))
+
+        local replyPart = ""
+        if safeReply ~= "" then
+            replyPart = "<font color='rgb(60,130,220)'>↩ "..safeReply.."</font>\n"
+        end
+
+        if tagData.type ~= "Normal" then
+            SpecialLabels[TextButton] = {
+                displayName = safeName, msg = safeMsg, nameColor = colorStr,
+                isPrivate = isPrivate, tagType = tagData.type, tagTitle = tagData.tagTitle,
+                titleColor = tagData.titleColor, replyTo = safeReply, senderUid = senderUid
+            }
+            TextButton.Text = replyPart..string.format("%s<font color='rgb(200,150,255)'><b>%s</b></font> <font color='%s'><b>%s</b></font>: %s",
+                privTag, tagData.tagTitle or "", colorStr, safeName, safeMsg)
+        else
+            TextButton.Text = replyPart..string.format("%s<font color='%s'><b>%s</b></font>: %s",
+                privTag, colorStr, safeName, safeMsg)
+        end
+
+        if not skipBubble then
+            for _, p in pairs(Players:GetPlayers()) do
+                if p.UserId == senderUid then createBubble(p, safeMsg, isPrivate) end
+            end
+        end
+    end
+
+    -- ⭐ ARES-STYLE TRACKING (order → messageOrder + messageMap)
+    local msgKey = (order and order ~= 0) and tostring(order) or tostring(os.time()*1000 + math.random(1,999))
+    if order and order ~= 0 then
+        table.insert(messageOrder, msgKey)
+        messageMap[msgKey] = {
+            frame = wrapperFrame,
+            btn = TextButton,
+            senderUid = senderUid,
+            content = safeMsg,
+        }
+        task.spawn(trimMessages)
+    end
+
+    local holdTriggered = false
+    local msgFbKey = (order and order ~= 0) and tostring(order) or nil
+    local isOwnMsg = (senderUid == RealUserId)
+
+    TextButton.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+            holdTriggered = false
+            local tapPos = inp.Position
+            task.delay(0.55, function()
+                if holdTriggered then return end
+                holdTriggered = true; closeMsgPopup()
+                local opts = {}
+                table.insert(opts, {icon="📋", label="Copy", callback=function()
+                    pcall(function()
+                        if setclipboard then setclipboard(safeMsg)
+                        elseif toclipboard then toclipboard(safeMsg) end
+                    end)
+                end})
+                if not isOwnMsg and not isSystem then
+                    table.insert(opts, {icon="💬", label="PVT", callback=function()
+                        PrivateTargetId = senderUid; PrivateTargetName = safeName
+                        Input.PlaceholderText = "[PVT] "..safeName.."..."
+                        InputArea.BackgroundColor3 = EmberTheme.accent
+                    end})
+                    table.insert(opts, {icon="↩️", label="Reply", callback=function()
+                        ReplyTargetName = safeName; ReplyTargetMsg = safeMsg
+                        ReplyBanner.Visible = true; ReplyLabel.Text = "Replying to "..safeName..": "..safeMsg
+                    end})
+                end
+                if isOwnMsg and not isSystem and msgFbKey then
+                    table.insert(opts, {icon="✏️", label="Edit", callback=function()
+                        editingKey = msgFbKey; Input.Text = msg
+                    end})
+                    table.insert(opts, {icon="🗑️", label="Unsend", destructive=true, callback=function()
+                        -- Remove from Ares-style tracking
+                        local newOrder = {}
+                        for _, k in ipairs(messageOrder) do
+                            if k ~= msgFbKey then table.insert(newOrder, k) end
+                        end
+                        messageOrder = newOrder
+                        messageMap[msgFbKey] = nil
+                        SpecialLabels[TextButton] = nil
+                        if wrapperFrame and wrapperFrame.Parent then
+                            TweenService:Create(TextButton, TweenInfo.new(0.2), {BackgroundTransparency = 1}):Play()
+                            task.delay(0.22, function() if wrapperFrame and wrapperFrame.Parent then wrapperFrame:Destroy() end end)
+                        end
+                        task.spawn(function()
+                            pcall(function()
+                                -- Ares-style: mark IsDeleted + delete
+                                fbReq({
+                                    Url = DATABASE_URL.."/"..msgFbKey.."/IsDeleted.json",
+                                    Method = "PUT",
+                                    Headers = {["Content-Type"]="application/json"},
+                                    Body = "true"
+                                })
+                                fbReq({Url=UNSENT_URL.."/"..msgFbKey..".json", Method="PUT", Headers={["Content-Type"]="application/json"}, Body=HttpService:JSONEncode(true)})
+                                task.wait(0.5)
+                                fbReq({Url=DATABASE_URL.."/"..msgFbKey..".json", Method="DELETE"})
+                            end)
+                        end)
+                    end})
+                end
+                showMsgPopup(Vector2.new(tapPos.X, tapPos.Y), opts)
+            end)
+        end
+    end)
+
+    task.spawn(function()
+        for i = 1, 5 do RunService.Heartbeat:Wait() end
+        if ChatLog and not userScrolledUp and wasAtBottom then
+            pcall(function()
+                ChatLog.CanvasPosition = Vector2.new(0, ChatLog.AbsoluteCanvasSize.Y)
+            end)
+        end
+    end)
+
+    if not isSystem and senderUid ~= RealUserId and not skipBubble then
+        local notifText
+        if isPrivate then
+            notifText = "<font color='rgb(255,120,255)'>[PVT] </font><b>"..safeName.."</b>: "..safeMsg:sub(1, 50)
+        else
+            local color = GetUserColor(safeName)
+            local cs = string.format("rgb(%d,%d,%d)", math.floor(color.R*255), math.floor(color.G*255), math.floor(color.B*255))
+            notifText = "<font color='"..cs.."'><b>"..safeName.."</b></font>: "..safeMsg:sub(1, 50)
+        end
+        showNotif(notifText)
+    end
+end
+
+local _lastRgbTick = 0
+RunService.Heartbeat:Connect(function()
+    local now = tick()
+    if now - _lastRgbTick < 0.1 then return end
+    _lastRgbTick = now
+    local hue = (now % 5) / 5
+    local color = Color3.fromHSV(hue, 1, 1)
+    local r = math.clamp(math.floor(color.R*255), 0, 255)
+    local g = math.clamp(math.floor(color.G*255), 0, 255)
+    local b = math.clamp(math.floor(color.B*255), 0, 255)
+    local rgbStr = "rgb("..r..","..g..","..b..")"
+    for label, data in pairs(SpecialLabels) do
+        if label and label.Parent then
+            local safeMsg = SafeEncodeMsg(data.msg)
+            local privTag = data.isPrivate and "<font color='rgb(255,100,255)'>[PVT] </font>" or ""
+            local tagTitle = data.tagTitle or ("["..(data.tagType or ""):upper().."]")
+            local fmtText
+            if data.tagType == "CustomTitle" then
+                local ctc = (data.titleColor == "RGB") and rgbStr or (data.titleColor or "rgb(220,50,50)")
+                fmtText = string.format("%s<font color='%s'><b>%s</b></font> <font color='%s'><b>%s</b></font>: %s",
+                    privTag, ctc, tagTitle, data.nameColor, data.displayName, safeMsg)
+            else
+                fmtText = string.format("%s<font color='%s'><b>%s</b></font> <font color='%s'><b>%s</b></font>: %s",
+                    privTag, rgbStr, tagTitle, data.nameColor, data.displayName, safeMsg)
+            end
+            if data.replyTo and data.replyTo ~= "" then
+                fmtText = "<font color='rgb(80,150,220)'>↩ "..SafeEncodeMsg(data.replyTo).."</font>\n"..fmtText
+            end
+            label.RichText = true
+            label.Text = fmtText
+        else
+            SpecialLabels[label] = nil
+        end
+    end
+end)
+
+local function clearMusicResults()
+    for _, c in pairs(t25.value86:GetChildren()) do
+        if not c:IsA("UIListLayout") then c:Destroy() end
+    end
+end
+
+local function renderMusicResults(results)
+    clearMusicResults()
+    if #results == 0 then
+        local empty = Instance.new("TextLabel", t25.value86)
+        empty.Size = UDim2.new(1, 0, 0, 40)
+        empty.BackgroundTransparency = 1
+        empty.Text = "No SoundCloud tracks found."
+        empty.TextColor3 = EmberTheme.text
+        empty.Font = Enum.Font.Gotham
+        empty.TextSize = 11
+        return
+    end
+    for i, track in ipairs(results) do
+        local row = Instance.new("Frame", t25.value86)
+        row.Size = UDim2.new(1, 0, 0, 54)
+        row.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+        row.BackgroundTransparency = 0.15
+        row.BorderSizePixel = 0
+        row.LayoutOrder = i
+        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+
+        local art = Instance.new("ImageLabel", row)
+        art.Size = UDim2.new(0, 46, 0, 46)
+        art.Position = UDim2.new(0, 4, 0.5, -23)
+        art.BackgroundColor3 = EmberTheme.accent
+        art.BackgroundTransparency = 0.3
+        art.BorderSizePixel = 0
+        art.ScaleType = Enum.ScaleType.Crop
+        Instance.new("UICorner", art).CornerRadius = UDim.new(0, 6)
+        art.Image = track.thumbnail or "rbxassetid://7733960981"
+
+        local nameLbl = Instance.new("TextLabel", row)
+        nameLbl.Size = UDim2.new(1, -100, 0, 18)
+        nameLbl.Position = UDim2.new(0, 54, 0, 6)
+        nameLbl.BackgroundTransparency = 1
+        nameLbl.Text = track.title or "Unknown"
+        nameLbl.TextColor3 = EmberTheme.text
+        nameLbl.Font = Enum.Font.GothamBold
+        nameLbl.TextSize = 10
+        nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+        nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+
+        local artistLbl = Instance.new("TextLabel", row)
+        artistLbl.Size = UDim2.new(1, -100, 0, 14)
+        artistLbl.Position = UDim2.new(0, 54, 0, 26)
+        artistLbl.BackgroundTransparency = 1
+        artistLbl.Text = "SoundCloud • "..(track.duration and (math.floor(track.duration/60)..":"..string.format("%02d",track.duration%60)) or "")
+        artistLbl.TextColor3 = Color3.fromRGB(120, 140, 170)
+        artistLbl.Font = Enum.Font.Gotham
+        artistLbl.TextSize = 9
+        artistLbl.TextXAlignment = Enum.TextXAlignment.Left
+
+        local playBtn = Instance.new("TextButton", row)
+        playBtn.Size = UDim2.new(0, 40, 0, 34)
+        playBtn.Position = UDim2.new(1, -44, 0.5, -17)
+        playBtn.BackgroundColor3 = EmberTheme.accent
+        playBtn.BorderSizePixel = 0
+        playBtn.Text = "▶"
+        playBtn.TextColor3 = Color3.new(1, 1, 1)
+        playBtn.Font = Enum.Font.GothamBold
+        playBtn.TextSize = 14
+        Instance.new("UICorner", playBtn).CornerRadius = UDim.new(0, 6)
+        playBtn.MouseButton1Click:Connect(function()
+            t25.value169(track)
+            task.spawn(t25.value173)
+        end)
+    end
+end
+
+t25.value168 = function(state)
+    if not t25.value89 or not t25.value89.Parent then return end
+    if state == "idle" then
+        t25.value89.Text = "▶ Play & Broadcast"
+        t25.value89.BackgroundColor3 = Color3.fromRGB(30, 215, 96)
+        if t25.value90 then t25.value90.Visible = false end
+        if t25.value95 then t25.value95.Visible = false end
+        if t25.value96 then t25.value96.Visible = false end
+    elseif state == "loading" then
+        t25.value89.Text = "⏳ Loading..."
+        t25.value89.BackgroundColor3 = Color3.fromRGB(200, 150, 0)
+    elseif state == "downloading" then
+        t25.value89.Text = "⬇ Downloading..."
+        t25.value89.BackgroundColor3 = Color3.fromRGB(100, 100, 220)
+    elseif state == "playing" then
+        t25.value89.Text = "⏸ Pause"
+        t25.value89.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+        if t25.value90 then t25.value90.Visible = true end
+        if t25.value95 then t25.value95.Visible = true end
+        if t25.value96 then t25.value96.Visible = true end
+    elseif state == "paused" then
+        t25.value89.Text = "▶ Resume"
+        t25.value89.BackgroundColor3 = Color3.fromRGB(30, 215, 96)
+    elseif state == "error" then
+        t25.value89.Text = "⚠ Error"
+        t25.value89.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+    end
+end
+
+t25.value169 = function(track)
+    t25.value140 = track
+    if t25.value87 then t25.value87.Text = "🎵 "..(track.title or "Unknown") end
+    if t25.value88 then t25.value88.Text = "Duration: "..string.format("%d:%02d", math.floor((track.duration or 0)/60), (track.duration or 0)%60) end
+    NowPlayingFrame.Visible = true
+end
+
+t25.value173 = function()
+    if not t25.value140 or not t25.value140.sc_track then return end
+    if _musicDownloading then return end
+    _musicDownloading = true
+    local value144 = t25.value144
+    task.spawn(function()
+        t25.value168("loading")
+        if t25.value146 then
+            pcall(function() t25.value146:Disconnect() end)
+            t25.value146 = nil
+        end
+        local v1299 = MusicPlayer
+        if v1299 then
+            pcall(function() v1299:Stop() end)
+            pcall(function() v1299.SoundId = "" end)
+        else
+            v1299 = Instance.new("Sound")
+            v1299.Parent = SoundService
+            v1299.Name = "EmberMusicPlayer"
+            MusicPlayer = v1299
+        end
+
+        local track = t25.value140.sc_track
+        local streamUrl = nil
+        pcall(function()
+            if track.media and track.media.transcodings then
+                local chosen
+                for _, tc in ipairs(track.media.transcodings) do
+                    if tc.format and tc.format.protocol == "progressive" then chosen = tc break end
+                end
+                if not chosen then chosen = track.media.transcodings[1] end
+                if chosen and chosen.url then
+                    local body = scFetch(chosen.url .. "?client_id=" .. getScClientId())
+                    if body then
+                        local ok, data = pcall(HttpService.JSONDecode, HttpService, body)
+                        if ok and type(data) == "table" and data.url then
+                            streamUrl = data.url
+                        end
+                    end
+                end
+            end
+        end)
+
+        if value144 ~= t25.value144 then _musicDownloading = false; return end
+        if not streamUrl then
+            t25.value168("error")
+            _musicDownloading = false
+            return
+        end
+        t25.value140.streamUrl = streamUrl
+
+        t25.value168("downloading")
+        pcall(function() makefolder("ember music") end)
+        local localAsset = nil
+        local okDl, body = pcall(function()
+            local fn = request or http_request or (http and http.request) or (syn and syn.request)
+            if not fn then return nil end
+            local r = fn({Url = streamUrl, Method = "GET"})
+            return r and r.Body
+        end)
+        if okDl and body and #body > 10000 and writefile then
+            local okWrite = pcall(writefile, "ember music/music_creator.mp3", body)
+            if okWrite then
+                task.wait(0.15)
+                pcall(function()
+                    localAsset = getcustomasset("ember music/music_creator.mp3")
+                end)
+            end
+        end
+
+        if value144 ~= t25.value144 then _musicDownloading = false; return end
+
+        if not localAsset then
+            t25.value168("error")
+            _musicDownloading = false
+            return
+        end
+
+        local success = pcall(function()
+            v1299.SoundId = localAsset
+            v1299.Volume = currentVolume
+            v1299.Looped = false
+            v1299.TimePosition = 0
+            v1299:Play()
+        end)
+
+        if not success then
+            t25.value168("error")
+            _musicDownloading = false
+            return
+        end
+
+        local waitTime = 0
+        while not v1299.IsPlaying and waitTime < 3 do
+            task.wait(0.1)
+            waitTime = waitTime + 0.1
+        end
+
+        t25.value168("playing")
+
+        task.spawn(function()
+            while v1299 and v1299.Parent do
+                RunService.Heartbeat:Wait()
+                if not v1299.IsPlaying then break end
+                if t25.value153 then continue end
+                local TimeLength = v1299.TimeLength
+                local TimePosition = v1299.TimePosition
+                if TimeLength and TimeLength > 0 then
+                    local prog = math.clamp(TimePosition / TimeLength, 0, 1)
+                    if t25.value91 and t25.value91.Parent then
+                        t25.value91.Size = UDim2.new(prog, 0, 1, 0)
+                    end
+                    if t25.value92 and t25.value92.Parent then
+                        t25.value92.Position = UDim2.new(prog, 0, 0.5, 0)
+                    end
+                    if t25.value95 and t25.value95.Parent then
+                        t25.value95.Text = string.format("%d:%02d", math.floor(TimePosition/60), math.floor(TimePosition%60))
+                    end
+                    if t25.value96 and t25.value96.Parent then
+                        t25.value96.Text = string.format("%d:%02d", math.floor(TimeLength/60), math.floor(TimeLength%60))
+                    end
+                end
+            end
+        end)
+
+        t25.value146 = v1299.Ended:Connect(function()
+            if t25.value146 then
+                pcall(function() t25.value146:Disconnect() end)
+                t25.value146 = nil
+            end
+            t25.value168("idle")
+        end)
+
+        broadcastMusic("play", {
+            title = t25.value140.title,
+            streamUrl = streamUrl,
+            duration = t25.value140.duration,
+            thumbnail = t25.value140.thumbnail,
+        }, RealDisplayName)
+
+        _musicDownloading = false
+    end)
+end
+
+t25.value82.MouseButton1Click:Connect(function()
+    local query = t25.value81.Text
+    if not query or query:match("^%s*$") then return end
+    t25.value86.Visible = false
+    t25.value82.Text = "Searching..."
+    t25.value82.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+    task.spawn(function()
+        local url = "https://api-v2.soundcloud.com/search/tracks?q=" .. HttpService:UrlEncode(query) .. "&client_id=" .. getScClientId() .. "&limit=20&offset=0"
+        local body = scFetch(url)
+        if not body then
+            t25.value82.Text = "Net Error"
+            t25.value82.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+            task.delay(2, function()
+                t25.value82.Text = "🔍"
+                t25.value82.BackgroundColor3 = EmberTheme.accent
+            end)
+            return
+        end
+        local ok, result = pcall(function() return HttpService:JSONDecode(body) end)
+        if not ok or type(result) ~= "table" or type(result.collection) ~= "table" then
+            t25.value82.Text = "Bad Data"
+            t25.value82.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+            task.delay(2, function()
+                t25.value82.Text = "🔍"
+                t25.value82.BackgroundColor3 = EmberTheme.accent
+            end)
+            return
+        end
+        local tracks = {}
+        for _, t in ipairs(result.collection) do
+            if t.kind == "track" then
+                local art = t.artwork_url
+                if art then art = art:gsub("-large%.jpg", "-t500x500.jpg") end
+                table.insert(tracks, {
+                    title = t.title,
+                    duration = t.duration and math.floor(t.duration/1000) or 0,
+                    thumbnail = art,
+                    sc_track = t,
+                })
+            end
+        end
+        if #tracks == 0 then
+            t25.value82.Text = "No Results"
+            t25.value82.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+            task.delay(2, function()
+                t25.value82.Text = "🔍"
+                t25.value82.BackgroundColor3 = EmberTheme.accent
+            end)
+            return
+        end
+        t25.value138 = tracks
+        t25.value139 = 0
+        renderMusicResults(tracks)
+        t25.value86.Visible = true
+        t25.value82.Text = "✓ " .. #tracks
+        t25.value82.BackgroundColor3 = Color3.fromRGB(30, 140, 60)
+        task.delay(1.5, function()
+            t25.value82.Text = "🔍"
+            t25.value82.BackgroundColor3 = EmberTheme.accent
+        end)
+    end)
+end)
+
+t25.value81.FocusLost:Connect(function(enterPressed)
+    if enterPressed then t25.value82.MouseButton1Click:Fire() end
+end)
+
+t25.value89.MouseButton1Click:Connect(function()
+    if not MusicPlayer then
+        if t25.value140 then task.spawn(t25.value173) end
+        return
+    end
+    if MusicPlayer.IsPlaying then
+        pcall(function() MusicPlayer:Pause() end)
+        t25.value168("paused")
+    else
+        pcall(function() MusicPlayer:Resume() end)
+        t25.value168("playing")
+    end
+end)
+
+StopMusicBtn.MouseButton1Click:Connect(function()
+    if MusicPlayer then
+        pcall(function() MusicPlayer:Stop() end)
+        pcall(function() MusicPlayer.SoundId = "" end)
+    end
+    t25.value168("idle")
+    broadcastMusic("stop", nil, RealDisplayName)
+    NowPlayingFrame.Visible = false
+end)
+
+PrevBtn.MouseButton1Click:Connect(function()
+    if #t25.value138 == 0 then return end
+    t25.value139 = t25.value139 - 1
+    if t25.value139 < 1 then t25.value139 = #t25.value138 end
+    t25.value169(t25.value138[t25.value139])
+    task.spawn(t25.value173)
+end)
+
+NextBtn.MouseButton1Click:Connect(function()
+    if #t25.value138 == 0 then return end
+    t25.value139 = t25.value139 + 1
+    if t25.value139 > #t25.value138 then t25.value139 = 1 end
+    t25.value169(t25.value138[t25.value139])
+    task.spawn(t25.value173)
+end)
+
+task.spawn(function()
+    while task.wait(2) do
+        pcall(syncMusic)
+    end
+end)
+
+local function send(msg, isSystem)
+    if isKickedOrBanned then return end
+    msg = tostring(msg or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if msg == "" then return end
+
+    lastActivityTime = os.time()
+
+    local isCommand = string.sub(msg, 1, 1) == "/"
+    local now = os.time()
+    if not isSystem and not isCommand then
+        if now - _lastSentTime < 2 and msg == _lastSentMsg then return end
+        _lastSentTime = now; _lastSentMsg = msg
+        if #msg > MAX_CHAR_LIMIT then msg = msg:sub(1, MAX_CHAR_LIMIT) end
+    end
+
+    if isCommand then
+        local parts = string.split(msg, " ")
+        local cmd = string.lower(parts[1])
+
+        if cmd == "/clear" then
+            for _, c in pairs(ChatLog:GetChildren()) do
+                if c:IsA("Frame") then c:Destroy() end
+            end
+            messageOrder = {}; messageMap = {}
+            showNotif("🧹 Chat cleared locally")
+            return
+        end
+
+        if cmd == "/commands" then
+            local cmds = {
+                "/clear — Clear chat",
+                "/commands — Show commands",
+                "/mute [name] — Mute player",
+                "/unmute [name] — Unmute player",
+                "/info [name] — Player info",
+                "/players — List players",
+                "/ping — Show ping",
+                "/time — Current time",
+                "/jobid — Job ID",
+                "/reset — Reset character",
+                "/rejoin — Rejoin server",
+                "/pfp [id] — Set PFP",
+                "/theme [name] — Set theme",
+            }
+            if isOwner then
+                table.insert(cmds, "── OWNER ONLY ──")
+                table.insert(cmds, "/kick [name] — Kick player")
+                table.insert(cmds, "/kill [name] — Kill player")
+                table.insert(cmds, "/freeze [name] — Freeze player")
+                table.insert(cmds, "/unfreeze [name] — Unfreeze player")
+                table.insert(cmds, "/ban [name] [reason] — Ban player")
+                table.insert(cmds, "/unban [name/id] — Unban player")
+                table.insert(cmds, "/title [name] [color] [text] — Give title")
+                table.insert(cmds, "/untitle [name] — Remove title")
+                table.insert(cmds, "/access [name] [seconds] — Give panel access")
+                table.insert(cmds, "/revoke [name] — Revoke panel access")
+                table.insert(cmds, "/announce [msg] — Global announce")
+            end
+            for _, c in ipairs(cmds) do
+                addMessage("SYSTEM", c, true, 0, 0, false, true)
+            end
+            return
+        end
+
+        if cmd == "/ping" then
+            local p = game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue()
+            addMessage("SYSTEM", "🏓 Ping: "..math.floor(p).." ms", true, 0, 0, false, true)
+            return
+        end
+
+        if cmd == "/time" then
+            addMessage("SYSTEM", "🕐 "..os.date("%H:%M:%S"), true, 0, 0, false, true)
+            return
+        end
+
+        if cmd == "/players" then
+            local pl = {}
+            for _, p in pairs(Players:GetPlayers()) do
+                table.insert(pl, p.DisplayName.." (@"..p.Name..")")
+            end
+            addMessage("SYSTEM", "👥 Players ("..#pl.."): "..table.concat(pl, ", "), true, 0, 0, false, true)
+            return
+        end
+
+        if cmd == "/jobid" then
+            addMessage("SYSTEM", "🆔 "..JobId, true, 0, 0, false, true)
+            return
+        end
+
+        if cmd == "/reset" then
+            if LocalPlayer.Character then LocalPlayer.Character:BreakJoints() end
+            addMessage("SYSTEM", "🔄 Character reset", true, 0, 0, false, true)
+            return
+        end
+
+        if cmd == "/rejoin" then
+            addMessage("SYSTEM", "🔁 Rejoining...", true, 0, 0, false, true)
+            task.wait(0.5)
+            game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
+            return
+        end
+
+        if cmd == "/mute" and parts[2] then
+            local t = GetPlayerByName(parts[2])
+            if t then
+                MutedPlayers[t.UserId] = true
+                addMessage("SYSTEM", "🔇 Muted "..t.DisplayName, true, 0, 0, false, true)
+            end
+            return
+        end
+
+        if cmd == "/unmute" and parts[2] then
+            local t = GetPlayerByName(parts[2])
+            if t then
+                MutedPlayers[t.UserId] = nil
+                addMessage("SYSTEM", "🔊 Unmuted "..t.DisplayName, true, 0, 0, false, true)
+            end
+            return
+        end
+
+        if cmd == "/info" and parts[2] then
+            local t = GetPlayerByName(parts[2])
+            if t then
+                addMessage("SYSTEM", "👤 "..t.DisplayName.." (@"..t.Name..") | ID: "..t.UserId.." | Age: "..t.AccountAge.."d", true, 0, 0, false, true)
+            end
+            return
+        end
+
+        if cmd == "/pfp" and parts[2] then
+            local asset = parts[2]
+            if not asset:find("rbxassetid://") then asset = "rbxassetid://"..asset end
+            applyPFP(asset, "custom")
+            return
+        end
+
+        if cmd == "/theme" and parts[2] then
+            for _, t in ipairs(ThemeColors) do
+                if string.lower(t.name) == string.lower(parts[2]) then
+                    applyEmberTheme(t); saveTheme()
+                    addMessage("SYSTEM", "🎨 Theme: "..t.name, true, 0, 0, false, true)
+                    return
+                end
+            end
+            return
+        end
+
+        if isOwner then
+            if cmd == "/kick" and parts[2] then
+                local t = GetPlayerByName(parts[2])
+                if t and not isPlayerOwner(t) then
+                    broadcastCommand(t.UserId, "kick", "Kicked by Ember Owner")
+                    addMessage("SYSTEM", "👢 Kicked "..t.DisplayName, true, 0, 0, false, true)
+                end
+                return
+            end
+
+            if cmd == "/kill" and parts[2] then
+                local t = GetPlayerByName(parts[2])
+                if t and not isPlayerOwner(t) then
+                    broadcastCommand(t.UserId, "kill", "")
+                    addMessage("SYSTEM", "💀 Killed "..t.DisplayName, true, 0, 0, false, true)
+                end
+                return
+            end
+
+            if cmd == "/freeze" and parts[2] then
+                local t = GetPlayerByName(parts[2])
+                if t and not isPlayerOwner(t) then
+                    broadcastCommand(t.UserId, "freeze", true)
+                    addMessage("SYSTEM", "❄ Froze "..t.DisplayName, true, 0, 0, false, true)
+                end
+                return
+            end
+
+            if cmd == "/unfreeze" and parts[2] then
+                local t = GetPlayerByName(parts[2])
+                if t and not isPlayerOwner(t) then
+                    broadcastCommand(t.UserId, "freeze", false)
+                    addMessage("SYSTEM", "🔥 Unfroze "..t.DisplayName, true, 0, 0, false, true)
+                end
+                return
+            end
+
+            if cmd == "/ban" and parts[2] then
+                local t = GetPlayerByName(parts[2])
+                local reason = table.concat(parts, " ", 3)
+                if reason == "" then reason = "Banned by Ember Owner" end
+                if t and not isPlayerOwner(t) then
+                    banPlayer(t.UserId, t.Name, reason)
+                    addMessage("SYSTEM", "🚫 Banned "..t.DisplayName.." — "..reason, true, 0, 0, false, true)
+                end
+                return
+            end
+
+            if cmd == "/unban" and parts[2] then
+                local t = GetPlayerByName(parts[2])
+                local uid = t and t.UserId or tonumber(parts[2])
+                if uid then
+                    unbanPlayer(uid)
+                    addMessage("SYSTEM", "✅ Unbanned user "..uid, true, 0, 0, false, true)
+                end
+                return
+            end
+
+            if cmd == "/title" and parts[2] and parts[3] then
+                local t = GetPlayerByName(parts[2])
+                if t then
+                    local cm = {red="rgb(220,50,50)", blue="rgb(80,160,255)", green="rgb(60,200,100)", yellow="rgb(220,180,0)", purple="rgb(160,80,255)", white="rgb(255,255,255)", black="rgb(60,60,60)", rgb="RGB_ANIMATED"}
+                    local cv = cm[string.lower(parts[3])] or "rgb(220,50,50)"
+                    local txt = table.concat(parts, " ", 4)
+                    if txt == "" then txt = "TITLE" end
+                    local exp = os.time() + 86400
+                    CustomTitles[t.UserId] = {title=txt, expiresAt=exp, color=cv}
+                    TagCache[t.UserId] = nil
+                    task.spawn(function()
+                        pcall(function()
+                            fbReq({Url = CUSTOM_TITLES_URL.."/"..t.UserId..".json", Method = "PUT", Headers = {["Content-Type"]="application/json"}, Body = HttpService:JSONEncode({title=txt, color=cv, expiresAt=exp})})
+                        end)
+                    end)
+                    addMessage("SYSTEM", "🏷️ Gave ["..txt.."] to "..t.DisplayName, true, 0, 0, false, true)
+                end
+                return
+            end
+
+            if cmd == "/untitle" and parts[2] then
+                local t = GetPlayerByName(parts[2])
+                if t then
+                    CustomTitles[t.UserId] = nil
+                    TagCache[t.UserId] = nil
+                    task.spawn(function()
+                        pcall(function() fbReq({Url = CUSTOM_TITLES_URL.."/"..t.UserId..".json", Method = "DELETE"}) end)
+                    end)
+                    addMessage("SYSTEM", "🗑️ Removed title from "..t.DisplayName, true, 0, 0, false, true)
+                end
+                return
+            end
+
+            if cmd == "/access" and parts[2] and parts[3] then
+                local t = GetPlayerByName(parts[2])
+                local dur = tonumber(parts[3])
+                if t and dur then
+                    givePanelAccess(t.UserId, t.Name, dur)
+                    addMessage("SYSTEM", "✅ Gave panel access to "..t.DisplayName.." for "..dur.."s", true, 0, 0, false, true)
+                end
+                return
+            end
+
+            if cmd == "/revoke" and parts[2] then
+                local t = GetPlayerByName(parts[2])
+                if t then
+                    revokePanelAccess(t.UserId)
+                    addMessage("SYSTEM", "🚫 Revoked panel access from "..t.DisplayName, true, 0, 0, false, true)
+                end
+                return
+            end
+
+            if cmd == "/announce" then
+                local txt = table.concat(parts, " ", 2)
+                if txt ~= "" then
+                    local ts = string.format("%012d", os.time())..math.random(100, 999)
+                    task.spawn(function()
+                        pcall(function()
+                            fbReq({Url = DATABASE_URL.."/"..ts..".json", Method = "PUT", Headers = {["Content-Type"]="application/json"}, Body = HttpService:JSONEncode({Sender="SYSTEM", SenderUid=0, Content="📢 "..txt, Server="GLOBAL", IsSystem=true})})
+                        end)
+                    end)
+                    addMessage("SYSTEM", "📢 Announcement sent!", true, 0, 0, false, true)
+                end
+                return
+            end
+        end
+    end
+
+    if editingKey then
+        local eKey = editingKey; editingKey = nil
+        local entry = messageMap[eKey]
+        if entry and entry.btn and entry.btn.Parent then
+            local c2 = GetUserColor(RealDisplayName)
+            local cs2 = string.format("rgb(%d,%d,%d)", math.floor(c2.R*255), math.floor(c2.G*255), math.floor(c2.B*255))
+            entry.btn.RichText = true
+            entry.btn.Text = string.format("<font color='%s'><b>%s</b></font>: %s <font color='rgb(150,120,200)'>(edited)</font>", cs2, SafeEncodeMsg(RealDisplayName), SafeEncodeMsg(msg))
+            SpecialLabels[entry.btn] = nil
+            entry.content = msg
+        end
+        task.spawn(function()
+            pcall(function()
+                local res = fbReq({Url = DATABASE_URL.."/"..eKey..".json", Method = "GET"})
+                if res and res.Body and res.Body ~= "null" then
+                    local ok, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
+                    if ok and type(data) == "table" then
+                        data.Content = msg; data.Edited = true
+                        fbReq({Url = DATABASE_URL.."/"..eKey..".json", Method = "PUT", Headers = {["Content-Type"]="application/json"}, Body = HttpService:JSONEncode(data)})
+                    end
+                end
+            end)
+        end)
+        return
+    end
+
+    local timestamp = string.format("%012d", os.time())..math.random(100, 999)
+    local replyStr = ReplyTargetName and (ReplyTargetName..": "..(ReplyTargetMsg or "")) or nil
+    local data = {
+        Sender = RealDisplayName, SenderUid = RealUserId, Content = msg, Server = JobId,
+        IsSystem = isSystem or false, TargetId = PrivateTargetId, ReplyTo = replyStr
+    }
+    processedKeys[timestamp] = true
+    addMessage(RealDisplayName, msg, isSystem, tonumber(timestamp) or 0, RealUserId, PrivateTargetId ~= nil, false, replyStr)
+    ReplyTargetName = nil; ReplyTargetMsg = nil; ReplyBanner.Visible = false
+    PrivateTargetId = nil; PrivateTargetName = nil
+    Input.PlaceholderText = "Message..."; InputArea.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+
+    task.spawn(function()
+        pcall(function()
+            fbReq({Url = DATABASE_URL.."/"..timestamp..".json", Method = "PUT", Headers = {["Content-Type"]="application/json"}, Body = HttpService:JSONEncode(data)})
+        end)
+    end)
+end
+
+local function broadcastCommand(uid, action, value)
+    task.spawn(function()
+        pcall(function()
+            local ts = string.format("%012d", os.time())..math.random(100, 999)
+            fbReq({
+                Url = CMDS_URL.."/"..ts..".json",
+                Method = "PUT",
+                Headers = {["Content-Type"]="application/json"},
+                Body = HttpService:JSONEncode({
+                    TargetUid = uid, Action = action, Value = value,
+                    IssuedBy = RealUserId, Server = JobId,
+                    expiresAt = os.time() + 5,
+                })
+            })
+        end)
+    end)
+end
+
+SendBtn.MouseButton1Click:Connect(function()
+    local txt = Input.Text:gsub("^%s+", ""):gsub("%s+$", "")
+    if txt == "" then return end
+    Input.Text = ""
+    send(txt, false)
+end)
+
+Input.FocusLost:Connect(function(enter)
+    if enter then
+        local txt = Input.Text:gsub("^%s+", ""):gsub("%s+$", "")
+        if txt == "" then return end
+        Input.Text = ""
+        send(txt, false)
+    end
+end)
+
+if isAdmin then
+    local PanelTarget = ""
+
+    local targetFrame = Instance.new("Frame", PanelScroll)
+    targetFrame.Size = UDim2.new(1, 0, 0, 60)
+    targetFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    targetFrame.BackgroundTransparency = 0.2
+    targetFrame.BorderSizePixel = 0
+    targetFrame.LayoutOrder = 1
+    Instance.new("UICorner", targetFrame).CornerRadius = UDim.new(0, 10)
+
+    local tgtLbl = Instance.new("TextLabel", targetFrame)
+    tgtLbl.Size = UDim2.new(1, -14, 0, 16)
+    tgtLbl.Position = UDim2.new(0, 7, 0, 4)
+    tgtLbl.Text = "🎯 TARGET PLAYER"
+    tgtLbl.TextColor3 = EmberTheme.text
+    tgtLbl.Font = Enum.Font.GothamBold
+    tgtLbl.TextSize = 10
+    tgtLbl.BackgroundTransparency = 1
+    tgtLbl.TextXAlignment = Enum.TextXAlignment.Left
+
+    local tgtBox = Instance.new("TextBox", targetFrame)
+    tgtBox.Size = UDim2.new(1, -14, 0, 26)
+    tgtBox.Position = UDim2.new(0, 7, 0, 22)
+    tgtBox.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    tgtBox.BorderSizePixel = 0
+    tgtBox.PlaceholderText = "Type username..."
+    tgtBox.Text = ""
+    tgtBox.TextColor3 = EmberTheme.text
+    tgtBox.Font = Enum.Font.Gotham
+    tgtBox.TextSize = 11
+    tgtBox.ClearTextOnFocus = false
+    Instance.new("UICorner", tgtBox).CornerRadius = UDim.new(0, 6)
+    tgtBox:GetPropertyChangedSignal("Text"):Connect(function() PanelTarget = tgtBox.Text end)
+
+    local secLbl = Instance.new("TextLabel", PanelScroll)
+    secLbl.Size = UDim2.new(1, 0, 0, 20)
+    secLbl.Text = "👥 Players in Server"
+    secLbl.TextColor3 = Color3.fromRGB(180, 150, 255)
+    secLbl.Font = Enum.Font.GothamBold
+    secLbl.TextSize = 10
+    secLbl.BackgroundTransparency = 1
+    secLbl.TextXAlignment = Enum.TextXAlignment.Left
+    secLbl.LayoutOrder = 2
+
+    local quickFrame = Instance.new("Frame", PanelScroll)
+    quickFrame.Size = UDim2.new(1, 0, 0, 34)
+    quickFrame.BackgroundTransparency = 1
+    quickFrame.LayoutOrder = 3
+    local qLayout = Instance.new("UIListLayout", quickFrame)
+    qLayout.FillDirection = Enum.FillDirection.Horizontal
+    qLayout.Padding = UDim.new(0, 4)
+
+    local function refreshQuick()
+        for _, c in pairs(quickFrame:GetChildren()) do
+            if c:IsA("TextButton") then c:Destroy() end
+        end
+        local n = 0
+        for _, p in pairs(Players:GetPlayers()) do
+            n = n + 1; if n > 6 then break end
+            local b = Instance.new("TextButton", quickFrame)
+            b.Size = UDim2.new(0, 50, 0, 30)
+            b.BackgroundColor3 = EmberTheme.accent
+            b.BorderSizePixel = 0
+            b.Text = p.Name:sub(1, 7)
+            b.TextColor3 = Color3.new(1, 1, 1)
+            b.Font = Enum.Font.GothamBold
+            b.TextSize = 9
+            b.LayoutOrder = n
+            Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+            b.MouseButton1Click:Connect(function() tgtBox.Text = p.Name; PanelTarget = p.Name end)
+        end
+    end
+    task.spawn(function() task.wait(0.5); refreshQuick() end)
+    Players.PlayerAdded:Connect(function() task.wait(0.5); refreshQuick() end)
+
+    local actionLbl = Instance.new("TextLabel", PanelScroll)
+    actionLbl.Size = UDim2.new(1, 0, 0, 20)
+    actionLbl.Text = "⚔ Actions"
+    actionLbl.TextColor3 = Color3.fromRGB(255, 120, 120)
+    actionLbl.Font = Enum.Font.GothamBold
+    actionLbl.TextSize = 10
+    actionLbl.BackgroundTransparency = 1
+    actionLbl.TextXAlignment = Enum.TextXAlignment.Left
+    actionLbl.LayoutOrder = 4
+
+    local actionFrame = Instance.new("Frame", PanelScroll)
+    actionFrame.Size = UDim2.new(1, 0, 0, 170)
+    actionFrame.BackgroundTransparency = 1
+    actionFrame.LayoutOrder = 5
+    local aLayout = Instance.new("UIListLayout", actionFrame)
+    aLayout.FillDirection = Enum.FillDirection.Horizontal
+    aLayout.Padding = UDim.new(0, 4)
+    aLayout.Wraps = true
+
+    local function makeBtn(text, color, order, fn)
+        local b = Instance.new("TextButton", actionFrame)
+        b.Size = UDim2.new(0.32, -4, 0, 30)
+        b.BackgroundColor3 = color
+        b.BorderSizePixel = 0
+        b.Text = text
+        b.TextColor3 = Color3.new(1, 1, 1)
+        b.Font = Enum.Font.GothamBold
+        b.TextSize = 9
+        b.LayoutOrder = order
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 7)
+        b.MouseButton1Click:Connect(fn)
+    end
+
+    local function runTargeted(fn, label)
+        local t = GetPlayerByName(PanelTarget)
+        if not t then showNotif("❌ Player not found"); return end
+        if isPlayerOwner(t) then showNotif("❌ Cannot target owner"); return end
+        fn(t)
+        showNotif("✅ "..label.." → "..t.DisplayName)
+    end
+
+    makeBtn("🦶 KICK", Color3.fromRGB(220, 120, 40), 1, function() runTargeted(function(t) broadcastCommand(t.UserId, "kick", "Kicked by Ember Owner") end, "Kicked") end)
+    makeBtn("💀 KILL", Color3.fromRGB(180, 40, 40), 2, function() runTargeted(function(t) broadcastCommand(t.UserId, "kill", "") end, "Killed") end)
+    makeBtn("🔄 RESPAWN", Color3.fromRGB(60, 140, 200), 3, function() runTargeted(function(t) broadcastCommand(t.UserId, "re", "") end, "Respawned") end)
+    makeBtn("❄ FREEZE", Color3.fromRGB(80, 160, 220), 4, function() runTargeted(function(t) broadcastCommand(t.UserId, "freeze", true) end, "Froze") end)
+    makeBtn("🔥 UNFREEZE", Color3.fromRGB(220, 140, 40), 5, function() runTargeted(function(t) broadcastCommand(t.UserId, "freeze", false) end, "Unfroze") end)
+    makeBtn("👻 INVISIBLE", Color3.fromRGB(120, 80, 200), 6, function() runTargeted(function(t) broadcastCommand(t.UserId, "invisible", "") end, "Invisible") end)
+    makeBtn("🧲 TP2ME", Color3.fromRGB(160, 80, 200), 7, function() runTargeted(function(t) broadcastCommand(t.UserId, "tp2me", RealUserId) end, "Teleported") end)
+    makeBtn("🔇 MUTE", Color3.fromRGB(100, 100, 140), 8, function() runTargeted(function(t) broadcastCommand(t.UserId, "mute", true) end, "Muted") end)
+    makeBtn("🔊 UNMUTE", Color3.fromRGB(60, 160, 120), 9, function() runTargeted(function(t) broadcastCommand(t.UserId, "mute", false) end, "Unmuted") end)
+
+    if isOwner then
+        makeBtn("🚫 BAN", Color3.fromRGB(140, 20, 20), 10, function()
+            runTargeted(function(t)
+                banPlayer(t.UserId, t.Name, "Banned by Ember Owner")
+            end, "Banned")
+        end)
+        makeBtn("✅ UNBAN", Color3.fromRGB(40, 160, 80), 11, function()
+            local t = GetPlayerByName(PanelTarget)
+            if not t then showNotif("❌ Player not found"); return end
+            unbanPlayer(t.UserId)
+            showNotif("✅ Unbanned "..t.DisplayName)
+        end)
+        makeBtn("🎁 GIVE ACCESS", Color3.fromRGB(80, 180, 220), 12, function()
+            local t = GetPlayerByName(PanelTarget)
+            if not t then showNotif("❌ Player not found"); return end
+            if isPlayerOwner(t) then showNotif("❌ Already owner"); return end
+            givePanelAccess(t.UserId, t.Name, 3600)
+            showNotif("✅ Panel access 1h → "..t.DisplayName)
+        end)
+        makeBtn("🚫 REVOKE", Color3.fromRGB(180, 60, 120), 13, function()
+            local t = GetPlayerByName(PanelTarget)
+            if not t then showNotif("❌ Player not found"); return end
+            revokePanelAccess(t.UserId)
+            showNotif("🚫 Revoked → "..t.DisplayName)
+        end)
+    end
+
+    local titleLbl = Instance.new("TextLabel", PanelScroll)
+    titleLbl.Size = UDim2.new(1, 0, 0, 20)
+    titleLbl.Text = "🏷 Custom Title"
+    titleLbl.TextColor3 = Color3.fromRGB(255, 220, 80)
+    titleLbl.Font = Enum.Font.GothamBold
+    titleLbl.TextSize = 10
+    titleLbl.BackgroundTransparency = 1
+    titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+    titleLbl.LayoutOrder = 6
+
+    local titleFrame = Instance.new("Frame", PanelScroll)
+    titleFrame.Size = UDim2.new(1, 0, 0, 84)
+    titleFrame.BackgroundColor3 = Color3.fromRGB(255, 250, 220)
+    titleFrame.BackgroundTransparency = 0.2
+    titleFrame.BorderSizePixel = 0
+    titleFrame.LayoutOrder = 7
+    Instance.new("UICorner", titleFrame).CornerRadius = UDim.new(0, 10)
+
+    local titleInput = Instance.new("TextBox", titleFrame)
+    titleInput.Size = UDim2.new(1, -14, 0, 24)
+    titleInput.Position = UDim2.new(0, 7, 0, 6)
+    titleInput.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    titleInput.BorderSizePixel = 0
+    titleInput.PlaceholderText = "Title text (e.g. VIP)"
+    titleInput.Text = ""
+    titleInput.TextColor3 = EmberTheme.text
+    titleInput.Font = Enum.Font.Gotham
+    titleInput.TextSize = 11
+    titleInput.ClearTextOnFocus = false
+    Instance.new("UICorner", titleInput).CornerRadius = UDim.new(0, 6)
+
+    local colors = {
+        {name="Red", rgb="rgb(220,50,50)", c=Color3.fromRGB(220, 50, 50)},
+        {name="Blue", rgb="rgb(80,160,255)", c=Color3.fromRGB(80, 160, 255)},
+        {name="Green", rgb="rgb(60,200,100)", c=Color3.fromRGB(60, 200, 100)},
+        {name="Yellow", rgb="rgb(220,180,0)", c=Color3.fromRGB(220, 180, 0)},
+        {name="Purple", rgb="rgb(160,80,255)", c=Color3.fromRGB(160, 80, 255)},
+        {name="White", rgb="rgb(255,255,255)", c=Color3.fromRGB(255, 255, 255)},
+        {name="Black", rgb="rgb(60,60,60)", c=Color3.fromRGB(60, 60, 60)},
+        {name="RGB", rgb="RGB_ANIMATED", c=Color3.fromRGB(255, 0, 128)},
+    }
+    local selectedColor = colors[1]
+    local cf = Instance.new("Frame", titleFrame)
+    cf.Size = UDim2.new(1, -14, 0, 26)
+    cf.Position = UDim2.new(0, 7, 0, 36)
+    cf.BackgroundTransparency = 1
+    local cl = Instance.new("UIListLayout", cf)
+    cl.FillDirection = Enum.FillDirection.Horizontal
+    cl.Padding = UDim.new(0, 3)
+
+    for i, c in ipairs(colors) do
+        local cb = Instance.new("TextButton", cf)
+        cb.Size = UDim2.new(0, 22, 0, 24)
+        cb.BorderSizePixel = 0
+        cb.Text = ""
+        cb.LayoutOrder = i
+        Instance.new("UICorner", cb).CornerRadius = UDim.new(0, 5)
+        if c.name == "RGB" then
+            cb.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+            local g = Instance.new("UIGradient", cb)
+            g.Color = ColorSequence.new({
+                ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 0, 0)),
+                ColorSequenceKeypoint.new(0.33, Color3.fromRGB(0, 255, 0)),
+                ColorSequenceKeypoint.new(0.67, Color3.fromRGB(0, 0, 255)),
+                ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 0, 0)),
+            })
+            task.spawn(function() while cb and cb.Parent do g.Rotation = (g.Rotation + 3) % 360; task.wait(0.05) end end)
+        else
+            cb.BackgroundColor3 = c.c
+        end
+        local st = Instance.new("UIStroke", cb); st.Color = Color3.fromRGB(80, 80, 80); st.Thickness = 1
+        cb.MouseButton1Click:Connect(function()
+            selectedColor = c
+            for _, o in pairs(cf:GetChildren()) do
+                if o:IsA("TextButton") then
+                    local os = o:FindFirstChildOfClass("UIStroke")
+                    if os then os.Color = Color3.fromRGB(80, 80, 80); os.Thickness = 1 end
+                end
+            end
+            local ms = cb:FindFirstChildOfClass("UIStroke")
+            if ms then ms.Color = Color3.fromRGB(0, 0, 0); ms.Thickness = 3 end
+        end)
+    end
+
+    local gTitleBtn = Instance.new("TextButton", titleFrame)
+    gTitleBtn.Size = UDim2.new(0.48, -10, 0, 22)
+    gTitleBtn.Position = UDim2.new(0, 7, 0, 66)
+    gTitleBtn.BackgroundColor3 = Color3.fromRGB(60, 180, 80)
+    gTitleBtn.BorderSizePixel = 0
+    gTitleBtn.Text = "✅ GIVE TITLE"
+    gTitleBtn.TextColor3 = Color3.new(1, 1, 1)
+    gTitleBtn.Font = Enum.Font.GothamBold
+    gTitleBtn.TextSize = 10
+    Instance.new("UICorner", gTitleBtn).CornerRadius = UDim.new(0, 5)
+    gTitleBtn.MouseButton1Click:Connect(function()
+        local t = GetPlayerByName(PanelTarget)
+        if not t then showNotif("❌ Player not found"); return end
+        local txt = titleInput.Text:gsub("^%s+", ""):gsub("%s+$", "")
+        if txt == "" then showNotif("❌ Title empty"); return end
+        local exp = os.time() + 86400
+        CustomTitles[t.UserId] = {title=txt, expiresAt=exp, color=selectedColor.rgb}
+        TagCache[t.UserId] = nil
+        task.spawn(function()
+            pcall(function()
+                fbReq({Url = CUSTOM_TITLES_URL.."/"..tostring(t.UserId)..".json", Method = "PUT", Headers = {["Content-Type"]="application/json"}, Body = HttpService:JSONEncode({title=txt, color=selectedColor.rgb, expiresAt=exp})})
+            end)
+        end)
+        showNotif("✅ Gave ["..txt.."] to "..t.DisplayName)
+    end)
+
+    local rTitleBtn = Instance.new("TextButton", titleFrame)
+    rTitleBtn.Size = UDim2.new(0.48, -10, 0, 22)
+    rTitleBtn.Position = UDim2.new(0.52, 3, 0, 66)
+    rTitleBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
+    rTitleBtn.BorderSizePixel = 0
+    rTitleBtn.Text = "🗑 REMOVE"
+    rTitleBtn.TextColor3 = Color3.new(1, 1, 1)
+    rTitleBtn.Font = Enum.Font.GothamBold
+    rTitleBtn.TextSize = 10
+    Instance.new("UICorner", rTitleBtn).CornerRadius = UDim.new(0, 5)
+    rTitleBtn.MouseButton1Click:Connect(function()
+        local t = GetPlayerByName(PanelTarget)
+        if not t then showNotif("❌ Player not found"); return end
+        CustomTitles[t.UserId] = nil; TagCache[t.UserId] = nil
+        task.spawn(function()
+            pcall(function() fbReq({Url = CUSTOM_TITLES_URL.."/"..tostring(t.UserId)..".json", Method = "DELETE"}) end)
+        end)
+        showNotif("✅ Removed title from "..t.DisplayName)
+    end)
+
+    local banLbl = Instance.new("TextLabel", PanelScroll)
+    banLbl.Size = UDim2.new(1, 0, 0, 20)
+    banLbl.Text = "🚫 Ban Management"
+    banLbl.TextColor3 = Color3.fromRGB(255, 100, 100)
+    banLbl.Font = Enum.Font.GothamBold
+    banLbl.TextSize = 10
+    banLbl.BackgroundTransparency = 1
+    banLbl.TextXAlignment = Enum.TextXAlignment.Left
+    banLbl.LayoutOrder = 10
+
+    local banFrame = Instance.new("Frame", PanelScroll)
+    banFrame.Size = UDim2.new(1, 0, 0, 32)
+    banFrame.BackgroundTransparency = 1
+    banFrame.LayoutOrder = 11
+
+    local banIn = Instance.new("TextBox", banFrame)
+    banIn.Size = UDim2.new(0.7, -4, 1, 0)
+    banIn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    banIn.BackgroundTransparency = 0.2
+    banIn.BorderSizePixel = 0
+    banIn.PlaceholderText = "Reason (optional)..."
+    banIn.Text = ""
+    banIn.TextColor3 = EmberTheme.text
+    banIn.Font = Enum.Font.Gotham
+    banIn.TextSize = 10
+    Instance.new("UICorner", banIn).CornerRadius = UDim.new(0, 6)
+
+    local banBtn = Instance.new("TextButton", banFrame)
+    banBtn.Size = UDim2.new(0.28, -4, 1, 0)
+    banBtn.Position = UDim2.new(0.72, 0, 0, 0)
+    banBtn.BackgroundColor3 = Color3.fromRGB(180, 30, 30)
+    banBtn.BorderSizePixel = 0
+    banBtn.Text = "🚫 BAN"
+    banBtn.TextColor3 = Color3.new(1, 1, 1)
+    banBtn.Font = Enum.Font.GothamBold
+    banBtn.TextSize = 10
+    Instance.new("UICorner", banBtn).CornerRadius = UDim.new(0, 6)
+    banBtn.MouseButton1Click:Connect(function()
+        local t = GetPlayerByName(PanelTarget)
+        if not t then showNotif("❌ Player not found"); return end
+        if isPlayerOwner(t) then showNotif("❌ Cannot ban owner"); return end
+        local reason = banIn.Text:gsub("^%s+", ""):gsub("%s+$", "")
+        if reason == "" then reason = "Banned by Ember Owner" end
+        banPlayer(t.UserId, t.Name, reason)
+        showNotif("🚫 Banned "..t.DisplayName)
+    end)
+
+    local unbanBtn = Instance.new("TextButton", PanelScroll)
+    unbanBtn.Size = UDim2.new(1, 0, 0, 30)
+    unbanBtn.LayoutOrder = 12
+    unbanBtn.BackgroundColor3 = Color3.fromRGB(40, 160, 80)
+    unbanBtn.BorderSizePixel = 0
+    unbanBtn.Text = "✅ UNBAN TARGET"
+    unbanBtn.TextColor3 = Color3.new(1, 1, 1)
+    unbanBtn.Font = Enum.Font.GothamBold
+    unbanBtn.TextSize = 10
+    Instance.new("UICorner", unbanBtn).CornerRadius = UDim.new(0, 6)
+    unbanBtn.MouseButton1Click:Connect(function()
+        local reasonTxt = banIn.Text:gsub("%s+", "")
+        local t = GetPlayerByName(PanelTarget)
+        local uid = t and t.UserId or tonumber(reasonTxt)
+        if not uid then showNotif("❌ Enter username or ID"); return end
+        unbanPlayer(uid)
+        showNotif("✅ Unbanned user "..uid)
+    end)
+
+    local accLbl = Instance.new("TextLabel", PanelScroll)
+    accLbl.Size = UDim2.new(1, 0, 0, 20)
+    accLbl.Text = "🎁 Panel Access Manager"
+    accLbl.TextColor3 = Color3.fromRGB(100, 220, 255)
+    accLbl.Font = Enum.Font.GothamBold
+    accLbl.TextSize = 10
+    accLbl.BackgroundTransparency = 1
+    accLbl.TextXAlignment = Enum.TextXAlignment.Left
+    accLbl.LayoutOrder = 13
+
+    local accFrame = Instance.new("Frame", PanelScroll)
+    accFrame.Size = UDim2.new(1, 0, 0, 32)
+    accFrame.BackgroundTransparency = 1
+    accFrame.LayoutOrder = 14
+
+    local accIn = Instance.new("TextBox", accFrame)
+    accIn.Size = UDim2.new(0.7, -4, 1, 0)
+    accIn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    accIn.BackgroundTransparency = 0.2
+    accIn.BorderSizePixel = 0
+    accIn.PlaceholderText = "Duration (e.g. 3600 = 1h)"
+    accIn.Text = "3600"
+    accIn.TextColor3 = EmberTheme.text
+    accIn.Font = Enum.Font.Gotham
+    accIn.TextSize = 10
+    Instance.new("UICorner", accIn).CornerRadius = UDim.new(0, 6)
+
+    local giveAccBtn = Instance.new("TextButton", accFrame)
+    giveAccBtn.Size = UDim2.new(0.28, -4, 1, 0)
+    giveAccBtn.Position = UDim2.new(0.72, 0, 0, 0)
+    giveAccBtn.BackgroundColor3 = Color3.fromRGB(80, 180, 220)
+    giveAccBtn.BorderSizePixel = 0
+    giveAccBtn.Text = "🎁 GIVE"
+    giveAccBtn.TextColor3 = Color3.new(1, 1, 1)
+    giveAccBtn.Font = Enum.Font.GothamBold
+    giveAccBtn.TextSize = 10
+    Instance.new("UICorner", giveAccBtn).CornerRadius = UDim.new(0, 6)
+    giveAccBtn.MouseButton1Click:Connect(function()
+        local t = GetPlayerByName(PanelTarget)
+        if not t then showNotif("❌ Player not found"); return end
+        if isPlayerOwner(t) then showNotif("❌ Already owner"); return end
+        local dur = tonumber(accIn.Text) or 3600
+        givePanelAccess(t.UserId, t.Name, dur)
+        showNotif("✅ Gave "..dur.."s access to "..t.DisplayName)
+    end)
+
+    local revokeBtn = Instance.new("TextButton", PanelScroll)
+    revokeBtn.Size = UDim2.new(1, 0, 0, 30)
+    revokeBtn.LayoutOrder = 15
+    revokeBtn.BackgroundColor3 = Color3.fromRGB(160, 40, 100)
+    revokeBtn.BorderSizePixel = 0
+    revokeBtn.Text = "🚫 REVOKE TARGET'S ACCESS"
+    revokeBtn.TextColor3 = Color3.new(1, 1, 1)
+    revokeBtn.Font = Enum.Font.GothamBold
+    revokeBtn.TextSize = 10
+    Instance.new("UICorner", revokeBtn).CornerRadius = UDim.new(0, 6)
+    revokeBtn.MouseButton1Click:Connect(function()
+        local t = GetPlayerByName(PanelTarget)
+        if not t then showNotif("❌ Player not found"); return end
+        revokePanelAccess(t.UserId)
+        showNotif("🚫 Revoked access from "..t.DisplayName)
+    end)
+
+    local annLbl = Instance.new("TextLabel", PanelScroll)
+    annLbl.Size = UDim2.new(1, 0, 0, 20)
+    annLbl.Text = "📢 Announcement"
+    annLbl.TextColor3 = Color3.fromRGB(255, 180, 100)
+    annLbl.Font = Enum.Font.GothamBold
+    annLbl.TextSize = 10
+    annLbl.BackgroundTransparency = 1
+    annLbl.TextXAlignment = Enum.TextXAlignment.Left
+    annLbl.LayoutOrder = 16
+
+    local annF = Instance.new("Frame", PanelScroll)
+    annF.Size = UDim2.new(1, 0, 0, 32)
+    annF.BackgroundTransparency = 1
+    annF.LayoutOrder = 17
+    local annIn = Instance.new("TextBox", annF)
+    annIn.Size = UDim2.new(0.7, -4, 1, 0)
+    annIn.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    annIn.BackgroundTransparency = 0.2
+    annIn.BorderSizePixel = 0
+    annIn.PlaceholderText = "Announcement..."
+    annIn.Text = ""
+    annIn.TextColor3 = EmberTheme.text
+    annIn.Font = Enum.Font.Gotham
+    annIn.TextSize = 10
+    Instance.new("UICorner", annIn).CornerRadius = UDim.new(0, 6)
+    local annB = Instance.new("TextButton", annF)
+    annB.Size = UDim2.new(0.28, -4, 1, 0)
+    annB.Position = UDim2.new(0.72, 0, 0, 0)
+    annB.BackgroundColor3 = Color3.fromRGB(220, 140, 40)
+    annB.BorderSizePixel = 0
+    annB.Text = "📢 SEND"
+    annB.TextColor3 = Color3.new(1, 1, 1)
+    annB.Font = Enum.Font.GothamBold
+    annB.TextSize = 10
+    Instance.new("UICorner", annB).CornerRadius = UDim.new(0, 6)
+    annB.MouseButton1Click:Connect(function()
+        local txt = annIn.Text:gsub("^%s+", ""):gsub("%s+$", "")
+        if txt == "" then return end
+        local ts = string.format("%012d", os.time())..math.random(100, 999)
+        task.spawn(function()
+            pcall(function()
+                fbReq({Url = DATABASE_URL.."/"..ts..".json", Method = "PUT", Headers = {["Content-Type"]="application/json"}, Body = HttpService:JSONEncode({Sender="SYSTEM", SenderUid=0, Content="📢 "..txt, Server="GLOBAL", IsSystem=true})})
+            end)
+        end)
+        showNotif("✅ Announcement sent")
+        annIn.Text = ""
+    end)
+end
+
+local lastData = ""
+local lastCmdsData = ""
+
+local function sync()
+    pcall(function()
+        local res = fbReq({Url = DATABASE_URL..'.json?orderBy="$key"&limitToLast=25', Method = "GET"})
+        if not res or not res.Body or res.Body == "null" or res.Body == lastData then return end
+        lastData = res.Body
+        local ok, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
+        if not ok or type(data) ~= "table" then return end
+        for key, entry in pairs(data) do
+            if not processedKeys[key] then
+                processedKeys[key] = true
+                -- ⭐ Ares-style: skip IsDeleted messages
+                if type(entry) == "table" and entry.IsDeleted then
+                    processedKeys[key] = true
+                else
+                    local keyTs = tonumber(string.sub(tostring(key), 1, 12)) or 0
+                    if keyTs >= SESSION_START_TIME and type(entry) == "table" then
+                        local isPriv = (entry.TargetId ~= nil)
+                        if not isPriv or entry.TargetId == RealUserId or entry.SenderUid == RealUserId then
+                            addMessage(tostring(entry.Sender or "Unknown"), tostring(entry.Content or ""),
+                                entry.IsSystem or false, tonumber(key) or 0, tonumber(entry.SenderUid) or 0,
+                                isPriv, false, entry.ReplyTo)
+                        end
+                    end
+                end
+            elseif type(entry) == "table" and entry.IsDeleted then
+                -- ⭐ Ares-style: remote delete sync
+                local keyStr = tostring(key)
+                local msgEntry = messageMap[keyStr]
+                if msgEntry and msgEntry.frame and msgEntry.frame.Parent then
+                    local newOrder = {}
+                    for _, k in ipairs(messageOrder) do
+                        if k ~= keyStr then table.insert(newOrder, k) end
+                    end
+                    messageOrder = newOrder
+                    messageMap[keyStr] = nil
+                    local frame = msgEntry.frame
+                    if msgEntry.btn and msgEntry.btn.Parent then
+                        TweenService:Create(msgEntry.btn, TweenInfo.new(0.2), {BackgroundTransparency = 1}):Play()
+                    end
+                    task.delay(0.22, function()
+                        if frame and frame.Parent then frame:Destroy() end
+                    end)
+                end
+            end
+        end
+    end)
+end
+
+local function syncCmds()
+    pcall(function()
+        local res = fbReq({Url = CMDS_URL..'.json?orderBy="$key"&limitToLast=10', Method = "GET"})
+        if not res or not res.Body or res.Body == "null" or res.Body == lastCmdsData then return end
+        lastCmdsData = res.Body
+        local ok, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
+        if not ok or type(data) ~= "table" then return end
+        local now = os.time()
+        for key, cmd in pairs(data) do
+            if type(cmd) == "table" and tonumber(cmd.TargetUid) == RealUserId then
+                if cmd.expiresAt and now > tonumber(cmd.expiresAt) then
+                    task.spawn(function()
+                        pcall(function()
+                            fbReq({Url = CMDS_URL.."/"..tostring(key)..".json", Method = "DELETE"})
+                        end)
+                    end)
+                elseif not isOwner then
+                    local a = cmd.Action
+                    if a == "kick" then isKickedOrBanned = true; LocalPlayer:Kick(tostring(cmd.Value or "Kicked"))
+                    elseif a == "ban" then isKickedOrBanned = true; LocalPlayer:Kick(tostring(cmd.Value or "Banned"))
+                    elseif a == "kill" then
+                        local h = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+                        if h then h.Health = 0 end
+                    elseif a == "re" then LocalPlayer:LoadCharacter()
+                    elseif a == "freeze" then
+                        local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                        if hrp then hrp.Anchored = (cmd.Value == true) end
+                    elseif a == "invisible" then
+                        local c = LocalPlayer.Character
+                        if c then for _, p in pairs(c:GetDescendants()) do if p:IsA("BasePart") then p.Transparency = 0.9 end end end
+                    elseif a == "tp2me" then
+                        local targetUid = tonumber(cmd.Value)
+                        local target = Players:GetPlayerByUserId(targetUid)
+                        if target and target.Character and target.Character:FindFirstChild("HumanoidRootPart") and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                            LocalPlayer.Character.HumanoidRootPart.CFrame = target.Character.HumanoidRootPart.CFrame * CFrame.new(3,0,0)
+                        end
+                    elseif a == "mute" then
+                        MutedPlayers[cmd.IssuedBy] = (cmd.Value == true)
+                    end
+                    task.spawn(function()
+                        pcall(function()
+                            fbReq({Url = CMDS_URL.."/"..tostring(key)..".json", Method = "DELETE"})
+                        end)
+                    end)
+                end
+            end
+        end
+    end)
+end
+
+task.spawn(function()
+    while task.wait(30) do
+        pcall(function()
+            local res = fbReq({Url = CMDS_URL..".json", Method = "GET"})
+            if res and res.Body and res.Body ~= "null" then
+                local ok, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
+                if ok and type(data) == "table" then
+                    local now = os.time()
+                    for key, cmd in pairs(data) do
+                        if type(cmd) == "table" and cmd.expiresAt and now > tonumber(cmd.expiresAt) then
+                            pcall(function()
+                                fbReq({Url = CMDS_URL.."/"..tostring(key)..".json", Method = "DELETE"})
+                            end)
+                        end
+                    end
+                end
+            end
+        end)
+    end
+end)
+
+task.spawn(function()
+    while task.wait(0.8) do
+        sync()
+        syncCmds()
+    end
+end)
+
+-- ⭐ ARES-STYLE AUTO-CLEAN (10 min inactivity)
+task.spawn(function()
+    while task.wait(30) do
+        if os.time() - lastActivityTime >= AUTO_CLEAN_INTERVAL then
+            local hasFrames = false
+            for _, c in pairs(ChatLog:GetChildren()) do
+                if c:IsA("Frame") then hasFrames = true; break end
+            end
+            if hasFrames then
+                for _, c in pairs(ChatLog:GetChildren()) do
+                    if c:IsA("Frame") then c:Destroy() end
+                end
+                messageOrder = {}; messageMap = {}
+                showNotif("🧹 Auto-cleaned (10 min inactivity)")
+            end
+            lastActivityTime = os.time()
+        end
+    end
+end)
+
+FloatBtn = Instance.new("TextButton", ScreenGui)
+FloatBtn.Size = UDim2.new(0, 40, 0, 40)
+FloatBtn.Position = UDim2.new(0, 14, 0.5, -20)
+FloatBtn.AnchorPoint = Vector2.new(0, 0.5)
+FloatBtn.BackgroundColor3 = EmberTheme.accent
+FloatBtn.BorderSizePixel = 0
+FloatBtn.Text = "✦"
+FloatBtn.TextSize = 18
+FloatBtn.Font = Enum.Font.GothamBold
+FloatBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+FloatBtn.ZIndex = 300
+Instance.new("UICorner", FloatBtn).CornerRadius = UDim.new(1, 0)
+
+do
+    local _d = false; local _s = nil; local _p = nil; local _m = false
+    FloatBtn.InputBegan:Connect(function(inp)
+        if isGuiLocked then return end
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+            _d = true; _m = false; _s = inp.Position; _p = FloatBtn.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(inp)
+        if isGuiLocked then _d = false; return end
+        if _d and (inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch) then
+            local delta = inp.Position - _s
+            if math.abs(delta.X) > 4 or math.abs(delta.Y) > 4 then _m = true end
+            FloatBtn.Position = UDim2.new(_p.X.Scale, _p.X.Offset + delta.X, _p.Y.Scale, _p.Y.Offset + delta.Y)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then _d = false end
+    end)
+    FloatBtn.MouseButton1Click:Connect(function()
+        if _m then return end
+        Main.Visible = not Main.Visible
+        FloatBtn.Text = Main.Visible and "✦" or "💬"
+    end)
+end
+
+local function updateOnline()
+    pcall(function()
+        fbReq({Url = ONLINE_URL.."/"..tostring(RealUserId)..".json", Method = "PUT", Headers = {["Content-Type"]="application/json"},
+            Body = HttpService:JSONEncode({name = RealDisplayName, uid = RealUserId, server = JobId, t = os.time()})})
+    end)
+end
+task.spawn(function() while task.wait(30) do pcall(updateOnline) end end)
+task.spawn(updateOnline)
+
+task.spawn(function()
+    while task.wait(15) do
+        pcall(function()
+            local res = fbReq({Url = CUSTOM_TITLES_URL..".json", Method = "GET"})
+            if res and res.Body and res.Body ~= "null" then
+                local ok, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
+                if ok and type(data) == "table" then
+                    local now = os.time()
+                    for uidStr, entry in pairs(data) do
+                        local uid = tonumber(uidStr)
+                        if uid and type(entry) == "table" and entry.expiresAt and entry.expiresAt > now then
+                            CustomTitles[uid] = {title = entry.title, expiresAt = entry.expiresAt, color = entry.color}
+                            TagCache[uid] = nil
+                        end
+                    end
+                end
+            end
+            loadAllPFPs()
+        end)
+    end
+end)
+
+task.spawn(function()
+    while task.wait(20) do
+        pcall(loadPanelAccess)
+    end
+end)
+
+local RP_NAME_TEXT = "✦ EMBER RECHAT ✦"
+
+local function setRPName(character)
+    if not character then return end
+    task.wait(0.5)
+    pcall(function()
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            pcall(function() humanoid.DisplayName = RP_NAME_TEXT end)
+        end
+    end)
+end
+
+if LocalPlayer.Character then
+    setRPName(LocalPlayer.Character)
+end
+
+LocalPlayer.CharacterAdded:Connect(function(char)
+    setRPName(char)
+end)
+
+local function applyRPNameToPlayer(plr)
+    if not plr then return end
+    task.spawn(function()
+        task.wait(1)
+        pcall(function()
+            if plr.Character then
+                local humanoid = plr.Character:FindFirstChildOfClass("Humanoid")
+                if humanoid then
+                    pcall(function() humanoid.DisplayName = RP_NAME_TEXT end)
+                end
+            end
+        end)
+    end)
+end
+
+Players.PlayerAdded:Connect(function(plr)
+    applyRPNameToPlayer(plr)
+    plr.CharacterAdded:Connect(function() applyRPNameToPlayer(plr) end)
+end)
+
+for _, plr in pairs(Players:GetPlayers()) do
+    applyRPNameToPlayer(plr)
+end
+
+task.spawn(function()
+    task.wait(1.5)
+    addMessage("SYSTEM", "⚡ Welcome to ✦ EMBER RECHAT ✦ — Type /commands for help.", true, 0, 0, false, true)
+    task.wait(0.5)
+    local welcome = Instance.new("Frame", ChatLog)
+    welcome.Size = UDim2.new(1, 0, 0, 50)
+    welcome.BackgroundColor3 = EmberTheme.accent
+    welcome.BackgroundTransparency = 0.15
+    welcome.BorderSizePixel = 0
+    welcome.LayoutOrder = os.time() * 1000
+    Instance.new("UICorner", welcome).CornerRadius = UDim.new(0, 12)
+    local wLbl = Instance.new("TextLabel", welcome)
+    wLbl.Size = UDim2.new(1, -10, 1, 0)
+    wLbl.Position = UDim2.new(0, 5, 0, 0)
+    wLbl.BackgroundTransparency = 1
+    wLbl.RichText = true
+    wLbl.Text = "🎀 EMBER RECHAT LOADED 🎀"
+    wLbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+    wLbl.Font = Enum.Font.GothamBold
+    wLbl.TextSize = 13
+    task.spawn(function()
+        while welcome and welcome.Parent do
+            local hue = (tick() % 4) / 4
+            welcome.BackgroundColor3 = Color3.fromHSV(hue, 0.9, 1)
+            task.wait(0.1)
+        end
+    end)
+end)
+
+warn("[EMBER RECHAT] Loaded — Owners: cravingsforanshi + krishnahuywar")
+warn("[EMBER RECHAT] Ares-style auto-delete ENABLED — oldest msgs auto-delete at 25")
+warn("[EMBER RECHAT] Auto-clean: 10 min inactivity")
